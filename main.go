@@ -6,10 +6,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"unicode"
+
+	"bytes"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/ochinchina/go-ini"
@@ -19,6 +20,31 @@ import (
 )
 
 var BuildVersion string = ""
+
+type CustomFormatter struct{}
+
+func (f *CustomFormatter) Format(entry *log.Entry) ([]byte, error) {
+	var b *bytes.Buffer
+	if entry.Buffer != nil {
+		b = entry.Buffer
+	} else {
+		b = &bytes.Buffer{}
+	}
+
+	// Format timestamp (RFC3339 matches 2020-08-24T18:53:10+08:00)
+	timestamp := entry.Time.Format("2006-01-02T15:04:05-07:00")
+
+	// Extract the optional "program" field
+	program := ""
+	if p, ok := entry.Data["program"]; ok {
+		program = fmt.Sprintf("%v: ", p)
+	}
+
+	// Format: <timestamp> [<level>] <program>: <msg>
+	fmt.Fprintf(b, "%s [%s] %s%s\n", timestamp, entry.Level.String(), program, entry.Message)
+
+	return b.Bytes(), nil
+}
 
 // Options the command line options
 type Options struct {
@@ -31,14 +57,16 @@ func init() {
 	nullLogger := logger.NewNullLogger(logger.NewNullLogEventEmitter())
 	log.SetOutput(nullLogger)
 	logFormat := os.Getenv("LOG_FORMAT")
+
 	if logFormat == "json" {
 		log.SetFormatter(&log.JSONFormatter{})
 	} else {
-		if runtime.GOOS == "windows" {
+		log.SetFormatter(&CustomFormatter{})
+		/*if runtime.GOOS == "windows" {
 			log.SetFormatter(&log.TextFormatter{DisableColors: true, FullTimestamp: true})
 		} else {
 			log.SetFormatter(&log.TextFormatter{DisableColors: false, FullTimestamp: true})
-		}
+		}*/
 	}
 	log.SetLevel(log.DebugLevel)
 }
