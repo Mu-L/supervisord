@@ -3,6 +3,6 @@
 
 package main
 
-func Daemonize(logfile string, proc func()) {
+func Daemonize(logfile string, pidfile string, proc func()) {
 	proc()
 }

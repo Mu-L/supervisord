@@ -602,6 +602,17 @@ func (s *Supervisor) startHTTPServer() {
 
 }
 
+func (s *Supervisor) GetPidFile() string {
+	supervisordConf, ok := s.config.GetSupervisord()
+	if ok {
+		env := config.NewStringExpression("here", s.config.GetConfigFileDir())
+		pidfile, err := env.Eval(supervisordConf.GetString("pidfile", "supervisord.pid"))
+		if err == nil {
+			return pidfile
+		}
+	}
+	return "supervisord.pid"
+}
 func (s *Supervisor) setSupervisordInfo() {
 	supervisordConf, ok := s.config.GetSupervisord()
 	if ok {

@@ -33,7 +33,8 @@ func (p *program) run() {
 	if options.Daemon {
 		logFile := getSupervisordLogFile(options.Configuration)
 		p.supervisor, _ = initServer()
-		Daemonize(logFile, func() {
+		pidfile := p.supervisor.GetPidFile()
+		Daemonize(logFile, pidfile, func() {
 			p.supervisor.WaitForExit()
 		})
 	} else {
