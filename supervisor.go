@@ -768,6 +768,34 @@ func (s *Supervisor) ClearAllProcessLogs(r *http.Request, args *struct{}, reply 
 	return nil
 }
 
+func (s *Supervisor) CreateForground(r *http.Request, args *struct{ Name string }, reply *struct{ Id string }) error {
+	proc := s.procMgr.Find(args.Name)
+	if proc == nil {
+		return fmt.Errorf("no such process %s", args.Name)
+	}
+
+	id, err := proc.CreateForground()
+	if err != nil {
+		return err
+	}
+	reply.Id = id
+	return nil
+}
+
+func (s *Supervisor) GetForgroundStdout(r *http.Request, args *struct{ Name, Id string }, reply *struct{ LogData string }) error {
+	proc := s.procMgr.Find(args.Name)
+	if proc == nil {
+		return fmt.Errorf("no such process with name %s", args.Name)
+	}
+
+	logData, err := proc.GetForgroundStdout(args.Id)
+	if err != nil {
+		return err
+	}
+	reply.LogData = logData
+	return nil
+}
+
 // GetManager get the Manager object created by supervisor
 func (s *Supervisor) GetManager() *process.Manager {
 	return s.procMgr

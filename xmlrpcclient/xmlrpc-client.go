@@ -449,7 +449,95 @@ func (r *XMLRPCClient) TailProcessLog(process string, offset int, length int, lo
 	r.post(operation, &ins, func(body io.ReadCloser, procError error) {
 		err = procError
 		if err == nil {
+
 			err = xml.DecodeClientResponse(body, &reply)
+			if reply.LogData == "<string></string>" {
+				reply.LogData = ""
+			}
+		}
+	})
+	return
+}
+
+func (r *XMLRPCClient) SendProcessStdin(process string, text string) (reply types.BooleanReply, err error) {
+	ins := struct {
+		Name  string
+		Chars string
+	}{
+		Name:  process,
+		Chars: text,
+	}
+	r.post("supervisor.sendProcessStdin", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}
+
+func (r *XMLRPCClient) ClearProcessLog(process string, logType string) (reply types.BooleanReply, err error) {
+	ins := struct {
+		Name string
+	}{
+		Name: process,
+	}
+	r.post("supervisor.ClearProcessLogs", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}
+func (r *XMLRPCClient) ReadAndClearLog(process string, offset int, length int, logType string) (reply types.ProcessTailLog, err error) {
+	ins := struct {
+		Name   string
+		Offset int
+		Length int
+	}{
+		Name:   process,
+		Offset: offset,
+		Length: length,
+	}
+	operation := "supervisor.readAndClearProcessStdoutLog"
+	if logType == "stderr" {
+		operation = "supervisor.readAndClearProcessStderrLog"
+	}
+
+	r.post(operation, &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}
+
+func (r *XMLRPCClient) CreateForground(process string) (reply struct{ Id string }, err error) {
+	ins := struct{ Name string }{Name: process}
+
+	r.post("supervisor.createForground", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+
+		}
+
+	})
+	return
+}
+
+func (r *XMLRPCClient) GetForgroundStdout(process, id string) (reply struct{ LogData string }, err error) {
+	ins := struct{ Name, Id string }{Name: process, Id: id}
+
+	r.post("supervisor.getForgroundStdout", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+			if reply.LogData == "<string></string>" {
+				reply.LogData = ""
+			}
 		}
 	})
 	return

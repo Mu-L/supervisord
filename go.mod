@@ -18,7 +18,7 @@ require (
 
 require (
 	github.com/ochinchina/supervisord/config v0.0.0-00010101000000-000000000000
-	github.com/ochinchina/supervisord/events v0.0.0-00010101000000-000000000000
+	github.com/ochinchina/supervisord/events v0.0.0-20260817032106-ebc9ca97cf12
 	github.com/ochinchina/supervisord/faults v0.0.0-00010101000000-000000000000
 	github.com/ochinchina/supervisord/logger v0.0.0-00010101000000-000000000000
 	github.com/ochinchina/supervisord/process v0.0.0-00010101000000-000000000000
@@ -33,6 +33,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-envparse v0.1.0 // indirect
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect

@@ -265,5 +265,7 @@ func (p *XMLRPC) createRPCServer(s *Supervisor) *rpc.Server {
 	xmlrpcCodec.RegisterAlias("supervisor.tailProcessStderrLog", "Supervisor.TailProcessStderrLog")
 	xmlrpcCodec.RegisterAlias("supervisor.clearProcessLogs", "Supervisor.ClearProcessLogs")
 	xmlrpcCodec.RegisterAlias("supervisor.clearAllProcessLogs", "Supervisor.ClearAllProcessLogs")
+	xmlrpcCodec.RegisterAlias("supervisor.createForground", "Supervisor.CreateForground")
+	xmlrpcCodec.RegisterAlias("supervisor.getForgroundStdout", "Supervisor.GetForgroundStdout")
 	return RPC
 }

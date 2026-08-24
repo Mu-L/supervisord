@@ -8,20 +8,207 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ochinchina/supervisord/events"
 	"github.com/ochinchina/supervisord/faults"
 )
+
+type ChainLogTail struct {
+	lock         sync.Mutex
+	logTailFuncs []func(log []byte)
+}
+
+func NewChainLogTail() *ChainLogTail {
+	return &ChainLogTail{logTailFuncs: make([]func(log []byte), 0)}
+}
+
+func (clt *ChainLogTail) AddLogTail(logTailFunc func(log []byte)) error {
+	clt.lock.Lock()
+	defer clt.lock.Unlock()
+
+	clt.logTailFuncs = append(clt.logTailFuncs, logTailFunc)
+	return nil
+}
+
+func (clt *ChainLogTail) RemoveLogTail(logTailFunc func(log []byte)) error {
+	clt.lock.Lock()
+	defer clt.lock.Unlock()
+
+	for i, f := range clt.logTailFuncs {
+		if fmt.Sprintf("%p", f) == fmt.Sprintf("%p", logTailFunc) {
+			clt.logTailFuncs = append(clt.logTailFuncs[:i], clt.logTailFuncs[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("log tail function not found")
+}
+
+func (clt *ChainLogTail) EmitLogTail(log []byte) {
+	clt.lock.Lock()
+	funcs := make([]func(log []byte), len(clt.logTailFuncs))
+	copy(funcs, clt.logTailFuncs)
+	clt.lock.Unlock()
+
+	for _, f := range funcs {
+		f(log)
+	}
+}
+
+type ForegroundLog struct {
+	lock    sync.Mutex
+	buffer  *ring.Ring
+	timeout int64
+	expire  int64
+}
+
+func NewForegroundLog(size int) *ForegroundLog {
+	return &ForegroundLog{buffer: ring.New(size),
+		timeout: 60,
+		expire:  time.Now().Unix() + 60}
+}
+
+func (ltb *ForegroundLog) AddLog(log []byte) {
+	ltb.lock.Lock()
+	defer ltb.lock.Unlock()
+	ltb.buffer.Value = string(log)
+	ltb.buffer = ltb.buffer.Next()
+}
+
+func (ltb *ForegroundLog) GetLog() string {
+	ltb.lock.Lock()
+	defer ltb.lock.Unlock()
+	logs := make([]string, 0)
+	ltb.buffer.Do(func(p interface{}) {
+		if p != nil {
+			logs = append(logs, p.(string))
+		}
+	})
+	ltb.buffer = ring.New(ltb.buffer.Len())
+	return strings.Join(logs, "\n")
+}
+
+func (ltb *ForegroundLog) UpdateExpire() {
+	ltb.lock.Lock()
+	defer ltb.lock.Unlock()
+	ltb.expire = time.Now().Unix() + ltb.timeout
+}
+
+func (ltb *ForegroundLog) IsExpired() bool {
+	ltb.lock.Lock()
+	defer ltb.lock.Unlock()
+	return time.Now().Unix() > ltb.expire
+}
+
+type ForegroundLogManager struct {
+	lock          sync.Mutex
+	logs          map[string]*ForegroundLog
+	timeout       int64
+	clearCallback func(string)
+}
+
+func NewForegroundLogManager(timeout int64, clearCallback func(string)) *ForegroundLogManager {
+	return &ForegroundLogManager{logs: make(map[string]*ForegroundLog), timeout: timeout, clearCallback: clearCallback}
+}
+
+func (ltbm *ForegroundLogManager) CreateForegroundLog(id string) error {
+	ltbm.lock.Lock()
+	defer ltbm.lock.Unlock()
+	if _, exists := ltbm.logs[id]; exists {
+		return errors.New("foreground log with this ID already exists")
+	}
+	ltbm.logs[id] = NewForegroundLog(1000)
+	return nil
+}
+
+func (ltbm *ForegroundLogManager) AddLog(id string, log []byte) error {
+	ltbm.lock.Lock()
+	defer ltbm.lock.Unlock()
+	foregroundLog, exists := ltbm.logs[id]
+	if !exists {
+		return errors.New("foreground log not found")
+	}
+	foregroundLog.AddLog(log)
+	return nil
+}
+
+func (ltbm *ForegroundLogManager) GetLog(id string) (string, error) {
+	ltbm.lock.Lock()
+	defer ltbm.lock.Unlock()
+	ltbm.clearExpiredBuffers()
+	foregroundLog, exists := ltbm.logs[id]
+	if !exists {
+		return "", errors.New("foreground log not found")
+	}
+	foregroundLog.UpdateExpire()
+	return foregroundLog.GetLog(), nil
+}
+
+func (ltbm *ForegroundLogManager) clearExpiredBuffers() {
+	keysToDelete := make([]string, 0)
+	for id, buffer := range ltbm.logs {
+		if buffer.IsExpired() {
+			keysToDelete = append(keysToDelete, id)
+		}
+	}
+
+	for _, id := range keysToDelete {
+		delete(ltbm.logs, id)
+		if ltbm.clearCallback != nil {
+			ltbm.clearCallback(id)
+		}
+	}
+}
+
+type LogListenerManager struct {
+	sync.Mutex
+	listeners map[string]func(log []byte)
+}
+
+func NewLogListenerManager() *LogListenerManager {
+	return &LogListenerManager{listeners: make(map[string]func(log []byte))}
+}
+
+func (llm *LogListenerManager) AddLogListener(id string, logListener func(log []byte)) error {
+	llm.Lock()
+	defer llm.Unlock()
+	_, exists := llm.listeners[id]
+	if exists {
+		return errors.New("log listener with this ID already exists")
+	}
+	llm.listeners[id] = logListener
+	return nil
+}
+
+func (llm *LogListenerManager) RemoveLogListener(id string) error {
+	llm.Lock()
+	defer llm.Unlock()
+	_, exists := llm.listeners[id]
+	if !exists {
+		return errors.New("log listener with this ID does not exist")
+	}
+	delete(llm.listeners, id)
+	return nil
+}
+
+func (llm *LogListenerManager) EmitLog(log []byte) {
+	llm.Lock()
+	defer llm.Unlock()
+	for _, listener := range llm.listeners {
+		listener(log)
+	}
+}
 
 // Logger the log interface to log program stdout/stderr logs to file
 type Logger interface {
 	io.WriteCloser
 	SetPid(pid int)
 	ReadLog(offset int64, length int64) (string, error)
-
 	ReadTailLog(offset int64, length int64) (string, int64, bool, error)
 	ClearCurLogFile() error
 	ClearAllLogFile() error
+	AddLogListener(id string, logListener func(log []byte)) error
+	RemoveLogListener(id string) error
 }
 
 // LogEventEmitter the interface to emit log events
@@ -31,25 +218,28 @@ type LogEventEmitter interface {
 
 // FileLogger log program stdout/stderr to file
 type FileLogger struct {
-	name            string
-	maxSize         int64
-	backups         int
-	fileSize        int64
-	file            *os.File
-	logEventEmitter LogEventEmitter
-	locker          sync.Locker
+	name               string
+	maxSize            int64
+	backups            int
+	fileSize           int64
+	file               *os.File
+	logEventEmitter    LogEventEmitter
+	logListenerManager *LogListenerManager
+	locker             sync.Locker
 }
 
 // SysLogger log program stdout/stderr to syslog
 type SysLogger struct {
 	NullLogger
-	logWriter       io.WriteCloser
-	logEventEmitter LogEventEmitter
+	logWriter          io.WriteCloser
+	logEventEmitter    LogEventEmitter
+	logListenerManager *LogListenerManager
 }
 
 // NullLogger discard the program stdout/stderr log
 type NullLogger struct {
-	logEventEmitter LogEventEmitter
+	logEventEmitter    LogEventEmitter
+	logListenerManager *LogListenerManager
 }
 
 // NullLocker no lock
@@ -64,111 +254,28 @@ type ChanLogger struct {
 
 // CompositeLogger dispatch the log message to other loggers
 type CompositeLogger struct {
-	lock    sync.Mutex
-	loggers []Logger
+	lock               sync.Mutex
+	loggers            []Logger
+	logListenerManager *LogListenerManager
 }
 
 type MemoryLogger struct {
-	lock            sync.Mutex
-	logEventEmitter LogEventEmitter
-	logs            *ring.Ring
-}
-
-func NewMemoryLogger(n int, logEventEmitter LogEventEmitter) *MemoryLogger {
-	return &MemoryLogger{
-		logs:            ring.New(n),
-		logEventEmitter: logEventEmitter,
-	}
-}
-
-func (ml *MemoryLogger) Write(p []byte) (n int, err error) {
-	ml.lock.Lock()
-	defer ml.lock.Unlock()
-	ml.logs.Value = string(p)
-	ml.logs = ml.logs.Next()
-	ml.logEventEmitter.emitLogEvent(string(p))
-	return len(p), nil
-}
-
-func (ml *MemoryLogger) Close() error {
-	return nil
-}
-
-func (ml *MemoryLogger) SetPid(pid int) {
-	//NOTHING TO DO
-}
-
-func (ml *MemoryLogger) ReadLog(offset int64, length int64) (string, error) {
-	if offset < 0 && length != 0 {
-		return "", faults.NewFault(faults.BadArguments, "BAD_ARGUMENTS")
-	}
-	if offset >= 0 && length < 0 {
-		return "", faults.NewFault(faults.BadArguments, "BAD_ARGUMENTS")
-	}
-
-	ml.lock.Lock()
-	defer ml.lock.Unlock()
-	var logs string = ""
-	ml.logs.Do(func(p interface{}) {
-		if p != nil {
-			logs = logs + "\n" + p.(string)
-		}
-	})
-	if offset >= int64(len(logs)) {
-		return "", errors.New("offset out of range")
-	}
-	if length <= 0 {
-		return logs, nil
-	}
-	end := offset + length
-	if end > int64(len(logs)) {
-		end = int64(len(logs))
-	}
-	return logs[offset:end], nil
-}
-
-func (ml *MemoryLogger) ReadTailLog(offset int64, length int64) (string, int64, bool, error) {
-	ml.lock.Lock()
-	defer ml.lock.Unlock()
-	var logs []string = make([]string, 0)
-	ml.logs.Do(func(p interface{}) {
-		if p != nil {
-			logs = append(logs, p.(string))
-		}
-	})
-	if offset >= int64(len(logs)) {
-		return "", offset, true, nil
-	}
-	end := offset + length
-	if end > int64(len(logs)) {
-		end = int64(len(logs))
-	}
-	return strings.Join(logs[offset:end], ""), end, end == int64(len(logs)), nil
-}
-
-func (ml *MemoryLogger) ClearCurLogFile() error {
-	ml.lock.Lock()
-	defer ml.lock.Unlock()
-	ml.logs = ring.New(ml.logs.Len())
-	return nil
-}
-
-func (ml *MemoryLogger) ClearAllLogFile() error {
-	ml.lock.Lock()
-	defer ml.lock.Unlock()
-	ml.logs = ring.New(ml.logs.Len())
-	return nil
+	lock               sync.Mutex
+	logEventEmitter    LogEventEmitter
+	logs               *ring.Ring
+	logListenerManager *LogListenerManager
 }
 
 // NewFileLogger creates FileLogger object
 func NewFileLogger(name string, maxSize int64, backups int, logEventEmitter LogEventEmitter, locker sync.Locker) *FileLogger {
 	logger := &FileLogger{name: name,
-		maxSize:         maxSize,
-		backups:         backups,
-		fileSize:        0,
-		file:            nil,
-		logEventEmitter: logEventEmitter,
-		locker:          locker}
+		maxSize:            maxSize,
+		backups:            backups,
+		fileSize:           0,
+		file:               nil,
+		logEventEmitter:    logEventEmitter,
+		logListenerManager: NewLogListenerManager(),
+		locker:             locker}
 	logger.openFile(false)
 	return logger
 }
@@ -350,6 +457,8 @@ func (l *FileLogger) Write(p []byte) (int, error) {
 	l.locker.Lock()
 	defer l.locker.Unlock()
 
+	l.logListenerManager.EmitLog(p)
+
 	n, err := l.file.Write(p)
 
 	if err != nil {
@@ -383,9 +492,23 @@ func (l *FileLogger) Close() error {
 	return nil
 }
 
+func (l *FileLogger) AddLogListener(id string, listener func([]byte)) error {
+	l.locker.Lock()
+	defer l.locker.Unlock()
+
+	return l.logListenerManager.AddLogListener(id, listener)
+}
+
+func (l *FileLogger) RemoveLogListener(id string) error {
+	l.locker.Lock()
+	defer l.locker.Unlock()
+	return l.logListenerManager.RemoveLogListener(id)
+}
+
 // Write log to syslog
 func (sl *SysLogger) Write(b []byte) (int, error) {
 	sl.logEventEmitter.emitLogEvent(string(b))
+	sl.logListenerManager.EmitLog(b)
 	if sl.logWriter == nil {
 		return 0, errors.New("not connect to syslog server")
 	}
@@ -402,7 +525,7 @@ func (sl *SysLogger) Close() error {
 
 // NewNullLogger creates NullLogger object
 func NewNullLogger(logEventEmitter LogEventEmitter) *NullLogger {
-	return &NullLogger{logEventEmitter: logEventEmitter}
+	return &NullLogger{logEventEmitter: logEventEmitter, logListenerManager: NewLogListenerManager()}
 }
 
 // SetPid sets pid of program
@@ -412,6 +535,7 @@ func (l *NullLogger) SetPid(pid int) {
 
 // Write log to NullLogger
 func (l *NullLogger) Write(p []byte) (int, error) {
+	l.logListenerManager.EmitLog(p)
 	l.logEventEmitter.emitLogEvent(string(p))
 	return len(p), nil
 }
@@ -439,6 +563,14 @@ func (l *NullLogger) ClearCurLogFile() error {
 // ClearAllLogFile returns error for NullLogger
 func (l *NullLogger) ClearAllLogFile() error {
 	return faults.NewFault(faults.NoFile, "NO_FILE")
+}
+
+func (l *NullLogger) RemoveLogListener(id string) error {
+	return l.logListenerManager.RemoveLogListener(id)
+}
+
+func (l *NullLogger) AddLogListener(id string, listener func([]byte)) error {
+	return l.logListenerManager.AddLogListener(id, listener)
 }
 
 // NewChanLogger creates ChanLogger object
@@ -501,14 +633,16 @@ func (l *NullLocker) Unlock() {
 // StdLogger stdout/stderr logger implementation
 type StdLogger struct {
 	NullLogger
-	logEventEmitter LogEventEmitter
-	writer          io.Writer
+	logEventEmitter    LogEventEmitter
+	writer             io.Writer
+	logListenerManager *LogListenerManager
 }
 
 // NewStdoutLogger creates StdLogger object
 func NewStdoutLogger(logEventEmitter LogEventEmitter) *StdLogger {
 	return &StdLogger{logEventEmitter: logEventEmitter,
-		writer: os.Stdout}
+		writer:             os.Stdout,
+		logListenerManager: NewLogListenerManager()}
 }
 
 // Write output to stdout/stderr
@@ -517,13 +651,23 @@ func (l *StdLogger) Write(p []byte) (int, error) {
 	if err != nil {
 		l.logEventEmitter.emitLogEvent(string(p))
 	}
+	l.logListenerManager.EmitLog(p)
 	return n, err
+}
+
+func (l *StdLogger) AddLogListener(id string, listener func([]byte)) error {
+	return l.logListenerManager.AddLogListener(id, listener)
+}
+
+func (l *StdLogger) RemoveLogListener(id string) error {
+	return l.logListenerManager.RemoveLogListener(id)
 }
 
 // NewStderrLogger creates stderr logger
 func NewStderrLogger(logEventEmitter LogEventEmitter) *StdLogger {
 	return &StdLogger{logEventEmitter: logEventEmitter,
-		writer: os.Stderr}
+		writer:             os.Stderr,
+		logListenerManager: NewLogListenerManager()}
 }
 
 // LogCaptureLogger capture the log for further analysis
@@ -584,6 +728,13 @@ func (l *LogCaptureLogger) ClearCurLogFile() error {
 // ClearAllLogFile clears all log files
 func (l *LogCaptureLogger) ClearAllLogFile() error {
 	return l.underlineLogger.ClearAllLogFile()
+}
+
+func (l *LogCaptureLogger) AddLogListener(id string, listener func([]byte)) error {
+	return l.underlineLogger.AddLogListener(id, listener)
+}
+func (l *LogCaptureLogger) RemoveLogListener(id string) error {
+	return l.underlineLogger.RemoveLogListener(id)
 }
 
 // NullLogEventEmitter will not emit log to any listener
@@ -673,9 +824,110 @@ func (bw *BackgroundWriteCloser) Close() error {
 	return bw.writeCloser.Close()
 }
 
+func NewMemoryLogger(n int, logEventEmitter LogEventEmitter) *MemoryLogger {
+	return &MemoryLogger{
+		logs:               ring.New(n),
+		logEventEmitter:    logEventEmitter,
+		logListenerManager: NewLogListenerManager(),
+	}
+}
+
+func (ml *MemoryLogger) Write(p []byte) (n int, err error) {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	ml.logs.Value = string(p)
+	ml.logs = ml.logs.Next()
+	ml.logEventEmitter.emitLogEvent(string(p))
+	ml.logListenerManager.EmitLog(p)
+	return len(p), nil
+}
+
+func (ml *MemoryLogger) Close() error {
+	return nil
+}
+
+func (ml *MemoryLogger) SetPid(pid int) {
+	//NOTHING TO DO
+}
+
+func (ml *MemoryLogger) ReadLog(offset int64, length int64) (string, error) {
+	if offset < 0 && length != 0 {
+		return "", faults.NewFault(faults.BadArguments, "BAD_ARGUMENTS")
+	}
+	if offset >= 0 && length < 0 {
+		return "", faults.NewFault(faults.BadArguments, "BAD_ARGUMENTS")
+	}
+
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	var logs string = ""
+	ml.logs.Do(func(p interface{}) {
+		if p != nil {
+			logs = logs + "\n" + p.(string)
+		}
+	})
+	if offset >= int64(len(logs)) {
+		return "", errors.New("offset out of range")
+	}
+	if length <= 0 {
+		return logs, nil
+	}
+	end := offset + length
+	if end > int64(len(logs)) {
+		end = int64(len(logs))
+	}
+	return logs[offset:end], nil
+}
+
+func (ml *MemoryLogger) ReadTailLog(offset int64, length int64) (string, int64, bool, error) {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	var logs []string = make([]string, 0)
+	ml.logs.Do(func(p interface{}) {
+		if p != nil {
+			logs = append(logs, p.(string))
+		}
+	})
+	if offset >= int64(len(logs)) {
+		return "", offset, true, nil
+	}
+	end := offset + length
+	if end > int64(len(logs)) {
+		end = int64(len(logs))
+	}
+	return strings.Join(logs[offset:end], ""), end, end == int64(len(logs)), nil
+}
+
+func (ml *MemoryLogger) ClearCurLogFile() error {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	ml.logs = ring.New(ml.logs.Len())
+	return nil
+}
+
+func (ml *MemoryLogger) ClearAllLogFile() error {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	ml.logs = ring.New(ml.logs.Len())
+	return nil
+}
+
+func (ml *MemoryLogger) AddLogListener(id string, listener func([]byte)) error {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	return ml.logListenerManager.AddLogListener(id, listener)
+}
+
+func (ml *MemoryLogger) RemoveLogListener(id string) error {
+	ml.lock.Lock()
+	defer ml.lock.Unlock()
+	return ml.logListenerManager.RemoveLogListener(id)
+}
+
 // NewCompositeLogger creates new CompositeLogger object (pool of loggers)
 func NewCompositeLogger(loggers []Logger) *CompositeLogger {
-	return &CompositeLogger{loggers: loggers}
+	return &CompositeLogger{loggers: loggers,
+		logListenerManager: NewLogListenerManager()}
 }
 
 // AddLogger adds logger to CompositeLogger pool
@@ -702,6 +954,7 @@ func (cl *CompositeLogger) Write(p []byte) (n int, err error) {
 	cl.lock.Lock()
 	defer cl.lock.Unlock()
 
+	cl.logListenerManager.EmitLog(p)
 	for i, logger := range cl.loggers {
 		if i == 0 {
 			n, err = logger.Write(p)
@@ -755,6 +1008,20 @@ func (cl *CompositeLogger) ClearCurLogFile() error {
 // ClearAllLogFile clear all the files of first logger in CompositeLogger pool
 func (cl *CompositeLogger) ClearAllLogFile() error {
 	return cl.loggers[0].ClearAllLogFile()
+}
+
+func (cl *CompositeLogger) AddLogListener(id string, listener func([]byte)) error {
+	cl.lock.Lock()
+	defer cl.lock.Unlock()
+
+	return cl.logListenerManager.AddLogListener(id, listener)
+}
+
+func (cl *CompositeLogger) RemoveLogListener(id string) error {
+	cl.lock.Lock()
+	defer cl.lock.Unlock()
+
+	return cl.logListenerManager.RemoveLogListener(id)
 }
 
 // NewLogger creates logger for a program with parameters

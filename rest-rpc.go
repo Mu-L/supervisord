@@ -53,6 +53,8 @@ func (sr *SupervisorRestful) CreateProgramHandler() http.Handler {
 	sr.router.HandleFunc("/program/restart/{node}/{name}", sr.RestartProgram).Methods("POST", "PUT")
 	sr.router.HandleFunc("/program/log/{node}/{name}/stdout", sr.ReadStdoutLog).Methods("GET")
 	sr.router.HandleFunc("/program/log/{node}/{name}/stderr", sr.ReadStderrLog).Methods("GET")
+	sr.router.HandleFunc("/program/log/{name}/stdout", sr.ReadStdoutLog).Methods("GET")
+	sr.router.HandleFunc("/program/log/{name}/stderr", sr.ReadStderrLog).Methods("GET")
 	sr.router.HandleFunc("/program/startPrograms", sr.StartPrograms).Methods("POST", "PUT")
 	sr.router.HandleFunc("/program/stopPrograms", sr.StopPrograms).Methods("POST", "PUT")
 	return sr.router

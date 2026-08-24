@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ochinchina/supervisord/config"
 	"github.com/ochinchina/supervisord/types"
@@ -91,6 +93,12 @@ type LogtailCommand struct {
 	} `positional-args:"yes" required:"yes"`
 }
 
+type ForegroundCommand struct {
+	Args struct {
+		Program string `positional-arg-name:"Program" description:"Name of the Program"`
+	} `positional-args:"yes" required:"yes"`
+}
+
 var ctlCommand CtlCommand
 var statusCommand StatusCommand
 var startCommand StartCommand
@@ -103,6 +111,7 @@ var reloadCommand ReloadCommand
 var pidCommand PidCommand
 var signalCommand SignalCommand
 var logtailCommand LogtailCommand
+var foregroundCommand ForegroundCommand
 
 func (x *CtlCommand) getServerURL() string {
 	options.Configuration, _ = findSupervisordConf()
@@ -421,6 +430,56 @@ func (x *CtlCommand) logTail(rpcc *xmlrpcclient.XMLRPCClient, program string, lo
 
 }
 
+func (x *CtlCommand) foreground(rpcc *xmlrpcclient.XMLRPCClient, program string) {
+	procInfo, err := x.getProcessInfo(rpcc, program)
+	if err != nil {
+		fmt.Printf("Fail to get process info of program %s: %v\n", program, err)
+		os.Exit(1)
+	}
+	if strings.ToUpper(procInfo.Statename) != "RUNNING" {
+		fmt.Printf("Program '%s' is not running\n", program)
+		os.Exit(1)
+	}
+
+	x.logTail(rpcc, program, "stdout")
+	reply, err := rpcc.CreateForground(program)
+	if err != nil {
+		fmt.Printf("Fail to create foreground for program %s: %v\n", program, err)
+		os.Exit(1)
+	}
+
+	// run the program in foreground
+	go func() {
+		client := x.createRPCClient()
+
+		for {
+			stdoutLog, err := client.GetForgroundStdout(program, reply.Id)
+			if err != nil {
+				fmt.Printf("Fail to tail stdout log of program %s: %v\n", program, err)
+				os.Exit(1)
+			}
+			os.Stdout.WriteString(stdoutLog.LogData)
+
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	for {
+		reader := bufio.NewReader(os.Stdin)
+		line, _, err := reader.ReadLine()
+		if err != nil {
+			os.Exit(1)
+		}
+
+		_, err = rpcc.SendProcessStdin(program, string(line)+"\n")
+		if err != nil {
+			fmt.Printf("Fail to send input to program %s: %v\n", program, err)
+			os.Exit(1)
+		}
+	}
+
+}
+
 func (x *CtlCommand) getANSIColor(statename string) string {
 	switch statename {
 	case "RUNNING":
@@ -501,6 +560,11 @@ func (lc *LogtailCommand) Execute(args []string) error {
 	return nil
 }
 
+func (fc *ForegroundCommand) Execute(args []string) error {
+	ctlCommand.foreground(ctlCommand.createRPCClient(), fc.Args.Program)
+	return nil
+}
+
 func init() {
 	ctlCmd, _ := parser.AddCommand("ctl",
 		"Control a running daemon",
@@ -535,8 +599,12 @@ func init() {
 		"shutdown supervisord",
 		&shutdownCommand)
 	_, _ = ctlCmd.AddCommand("reload",
-		"reload the programs",
-		"reload the programs",
+		"reload the supervisord configuration and start programs",
+		"reload the supervisord configuration and start programs",
+		&reloadCommand)
+	_, _ = ctlCmd.AddCommand("update",
+		"reload the supervisord configuration and start programs",
+		"reload the supervisord configuration and start programs",
 		&reloadCommand)
 	_, _ = ctlCmd.AddCommand("signal",
 		"send signal to program",
@@ -550,4 +618,12 @@ func init() {
 		"get the standard output&standard error of the program",
 		"get the standard output&standard error of the program",
 		&logtailCommand)
+	_, _ = ctlCmd.AddCommand("foreground",
+		"run the program in foreground",
+		"run the program in foreground",
+		&foregroundCommand)
+	_, _ = ctlCmd.AddCommand("fg",
+		"run the program in foreground",
+		"run the program in foreground",
+		&foregroundCommand)
 }
