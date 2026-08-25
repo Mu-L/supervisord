@@ -46,6 +46,23 @@ jobs:
             goarch: arm64
             output_name: supervisord_darwin_arm64
 
+          # --- FreeBSD Targets ---
+          - goos: freebsd
+            goarch: amd64
+            output: supervisord_freebsd_amd64
+          - goos: freebsd
+            goarch: arm64
+            output: supervisord_freebsd_arm64
+          - goos: freebsd
+            goarch: arm
+            goarm: "7"
+            output: supervisord_freebsd_arm7
+
+          # --- AIX Targets ---
+          - goos: aix
+            goarch: ppc64
+            output: supervisord_aix_ppc64            
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
