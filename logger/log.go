@@ -866,7 +866,7 @@ func (ml *MemoryLogger) ReadLog(offset int64, length int64) (string, error) {
 			logs = logs + "\n" + p.(string)
 		}
 	})
-	if offset >= int64(len(logs)) {
+	if offset > 0 && offset >= int64(len(logs)) {
 		return "", errors.New("offset out of range")
 	}
 	if length <= 0 {
@@ -888,7 +888,7 @@ func (ml *MemoryLogger) ReadTailLog(offset int64, length int64) (string, int64, 
 			logs = append(logs, p.(string))
 		}
 	})
-	if offset >= int64(len(logs)) {
+	if offset > 0 && offset >= int64(len(logs)) {
 		return "", offset, true, nil
 	}
 	end := offset + length
@@ -1077,5 +1077,42 @@ func createLogger(programName string, logFile string, locker sync.Locker, maxByt
 		return NewNullLogger(logEventEmitter)
 
 	}
+
+}
+
+type ReformatLog struct {
+	output io.Writer
+}
+
+func NewReformatLog(output io.Writer) *ReformatLog {
+	return &ReformatLog{output: output}
+}
+
+func (rl *ReformatLog) Write(p []byte) (n int, err error) {
+	if p == nil || len(p) == 0 || p[0] == '{' {
+		return rl.output.Write(p)
+	}
+	message := string(p)
+
+	timeStartPos := strings.Index(message, "time=\"")
+	if timeStartPos != -1 {
+		timeEndPos := strings.Index(message[timeStartPos+6:], "\"")
+		if timeEndPos != -1 {
+			timeEndPos += timeStartPos + 6
+			message = message[:timeStartPos] + message[timeStartPos+6:timeEndPos] + message[timeEndPos+1:]
+		}
+	}
+
+	levelStartPos := strings.Index(message, "level=")
+	if levelStartPos != -1 {
+		levelEndPos := strings.Index(message[levelStartPos+6:], " ")
+		if levelEndPos != -1 {
+			levelEndPos += levelStartPos + 6
+			message = message[:levelStartPos] + "[" + message[levelStartPos+6:levelEndPos] + "] " + message[levelEndPos+1:]
+		}
+	}
+
+	rl.output.Write([]byte(message))
+	return len(p), nil
 
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -539,22 +540,6 @@ func (s *Supervisor) startEventListeners() {
 	}
 }
 
-func parseRemoteSupervisors(remotes string) map[string]string {
-	remoteSupervisors := make(map[string]string)
-	fields := strings.Split(remotes, ",")
-	for _, field := range fields {
-		field = strings.TrimSpace(field)
-		namePorts := strings.SplitN(field, ":", 2)
-		if len(namePorts) == 2 {
-			name := strings.TrimSpace(namePorts[0])
-			port := "http://" + strings.TrimSpace(namePorts[1])
-			remoteSupervisors[name] = port
-
-		}
-	}
-	return remoteSupervisors
-}
-
 func (s *Supervisor) startHTTPServer() {
 	httpServerConfig, ok := s.config.GetInetHTTPServer()
 	s.xmlRPC.Stop()
@@ -569,7 +554,7 @@ func (s *Supervisor) startHTTPServer() {
 				httpServerConfig.GetString("password", ""),
 				addr,
 				s,
-				parseRemoteSupervisors(httpServerConfig.GetString("remotes", "")),
+				s.getRemoteNodes(),
 				func() {
 					cond.L.Lock()
 					cond.Signal()
@@ -600,6 +585,39 @@ func (s *Supervisor) startHTTPServer() {
 		}
 	}
 
+}
+
+func (s *Supervisor) getRemoteNodes() map[string]*NodeLoginInfo {
+
+	result := make(map[string]*NodeLoginInfo)
+
+	httpServerConfig, exist := s.config.GetInetHTTPServer()
+
+	if !exist {
+		log.Warn("inet_http_server section not found in config file")
+		return result
+	}
+
+	for i := 1; i < 1000; i++ {
+		port := httpServerConfig.GetString("remote_"+strconv.Itoa(i)+"_port", "")
+		if port == "" {
+			continue
+		}
+
+		node := httpServerConfig.GetString("remote_"+strconv.Itoa(i)+"_node", "")
+		if node == "" {
+			node = port
+		}
+
+		user := httpServerConfig.GetString("remote_"+strconv.Itoa(i)+"_user", "")
+		password := httpServerConfig.GetString("remote_"+strconv.Itoa(i)+"_password", "")
+		if port != "" {
+			result[node] = NewNodeLoginInfo(node, "http://"+port, user, password)
+		}
+		log.WithFields(log.Fields{"node": node, "port": port, "user": user}).Info("remote node configured")
+	}
+
+	return result
 }
 
 func (s *Supervisor) GetPidFile() string {
@@ -636,7 +654,7 @@ func (s *Supervisor) setSupervisordInfo() {
 			s.logger = logger.NewLogger("supervisord", logFile, &sync.Mutex{}, logfileMaxbytes, logfileBackups, props, logEventEmitter)
 			log.SetLevel(toLogLevel(loglevel))
 			log.SetFormatter(&log.TextFormatter{DisableColors: true, FullTimestamp: true})
-			log.SetOutput(s.logger)
+			log.SetOutput(logger.NewReformatLog(s.logger))
 		}
 		// set the pid
 		pidfile, err := env.Eval(supervisordConf.GetString("pidfile", "supervisord.pid"))

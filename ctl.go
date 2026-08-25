@@ -442,6 +442,8 @@ func (x *CtlCommand) foreground(rpcc *xmlrpcclient.XMLRPCClient, program string)
 	}
 
 	x.logTail(rpcc, program, "stdout")
+
+	os.Stdout.WriteString("\n\nEnter input to send to the program's stdin (Ctrl+C to exit):\n")
 	reply, err := rpcc.CreateForground(program)
 	if err != nil {
 		fmt.Printf("Fail to create foreground for program %s: %v\n", program, err)

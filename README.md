@@ -262,15 +262,25 @@ Please note that in order to see|use Web GUI you should configure it in /etc/sup
 
 If you like to check status of another supervisord instances, you need to configure additional parameters in section **inet_http_server**:
 - **nodename** the node name which the supervisord is running, if it is not configured, it will be the host name of the supervisord is in running
-- **remotes** this parameter is used to configure the remote supervisord information in format **&lt;nodename&gt;:&lt;ip&gt;:&lt;port-number&gt;\[,&lt;nodename&gt;:&lt;ip&gt;:&lt;port-number&gt;\]**
+- **remote_x_node** the xth remote node name
+- **remote_x_port** the xth remote port
+- **remote_x_user** the xth remote username
+- **remote_x_password** the xth remote passwoed
 
 ```ini
 [inet_http_server]
-;nodename=node-1
+nodename=node-1
 port=127.0.0.1:9001
-;username=test1
-;password=thepassword
-;remotes=node-2:10.0.0.2:9001,node-3:10.0.0.2:9001,node-4:10.0.0.3:9001
+username=test1
+password=thepassword
+remote_1_node=node-2
+remote_1_port=10.0.0.2:9001
+remote_1_user=test1
+remote_1_passwrod=test1
+remote_2_node=node-3
+remote_2_port=10.0.0.3:9001
+remote_2_user=test2
+remote_2_passwrod=test2
 
 [supervisorctl]
 serverurl=http://127.0.0.1:9001

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/kardianos/service"
+	"github.com/ochinchina/supervisord/logger"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,7 +30,7 @@ func (p *program) Start(s service.Service) error {
 }
 
 func (p *program) run() {
-	log.SetOutput(os.Stdout)
+	log.SetOutput(logger.NewReformatLog(os.Stdout))
 	if options.Daemon {
 		logFile := getSupervisordLogFile(options.Configuration)
 		p.supervisor, _ = initServer()

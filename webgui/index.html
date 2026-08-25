@@ -607,8 +607,8 @@
 
         async tailLog(proc, type) {
           try {
-            
-            const response = await fetch(`/program/log/${proc.node}/${proc.name}/${type}`);
+            let url = type === "stdout" ? `/program/log_stdout/${proc.node}/${proc.name}` : `/program/log_stderr/${proc.node}/${proc.name}`;
+            const response = await fetch(url);
             if (!response.ok) {
               throw new Error(`Failed to fetch log for ${proc.name} on node ${proc.node}`);
             }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -24,51 +25,149 @@ type NodeInfo struct {
 	MemUsedPercent float32 `json:"mem_used_percent"`
 }
 
+type NodeLoginInfo struct {
+	name     string
+	url      string
+	user     string
+	password string
+}
+
+func NewNodeLoginInfo(name, url, user, password string) *NodeLoginInfo {
+	return &NodeLoginInfo{name: name, url: url, user: user, password: password}
+}
+
+type NodeLoginManager struct {
+	sync.Mutex
+	nodes map[string]*NodeLoginInfo
+}
+
+func NewNodeLoginManager() *NodeLoginManager {
+	return &NodeLoginManager{nodes: make(map[string]*NodeLoginInfo)}
+}
+
+func (nlm *NodeLoginManager) AddNode(node *NodeLoginInfo) {
+	nlm.Lock()
+	defer nlm.Unlock()
+	if _, exists := nlm.nodes[node.name]; !exists {
+		log.WithFields(log.Fields{"node": node.name, "url": node.url}).Info("adding a new remote supervisor node")
+	}
+	nlm.nodes[node.name] = node
+}
+
+func (nlm *NodeLoginManager) GetNode(name string) (*NodeLoginInfo, bool) {
+	nlm.Lock()
+	defer nlm.Unlock()
+	node, exists := nlm.nodes[name]
+	return node, exists
+}
+
+func (nlm *NodeLoginManager) GetAllNode() map[string]*NodeLoginInfo {
+	nlm.Lock()
+	defer nlm.Unlock()
+	nodesCopy := make(map[string]*NodeLoginInfo)
+	for name, node := range nlm.nodes {
+		nodesCopy[name] = node
+	}
+	return nodesCopy
+}
+
+func (nlm *NodeLoginManager) RemoveNode(name string) {
+	nlm.Lock()
+	defer nlm.Unlock()
+	if node, exists := nlm.nodes[name]; exists {
+		log.WithFields(log.Fields{"node": name, "url": node.url}).Info("removing remote supervisor node")
+		delete(nlm.nodes, name)
+	}
+}
+
+func (nlm *NodeLoginManager) GetAllNodeName() []string {
+	nlm.Lock()
+	defer nlm.Unlock()
+	nodeNames := make([]string, 0, len(nlm.nodes))
+	for name := range nlm.nodes {
+		nodeNames = append(nodeNames, name)
+	}
+	sort.Strings(nodeNames)
+	return nodeNames
+}
+
 // SupervisorRestful the restful interface to control the programs defined in configuration file
 type SupervisorRestful struct {
-	router     *mux.Router
 	supervisor *Supervisor
-	// key: node name, value: supervisor URL
-	remoteSupervisors map[string]string
+
+	remoteSupervisors *NodeLoginManager
 }
 
 // NewSupervisorRestful create a new SupervisorRestful object
 func NewSupervisorRestful(supervisor *Supervisor) *SupervisorRestful {
-	return &SupervisorRestful{router: mux.NewRouter(), supervisor: supervisor, remoteSupervisors: make(map[string]string)}
+	return &SupervisorRestful{supervisor: supervisor, remoteSupervisors: NewNodeLoginManager()}
 }
 
-func (sr *SupervisorRestful) AddRemoteSupervisors(remoteSupervisors map[string]string) *SupervisorRestful {
-	for node, url := range remoteSupervisors {
-		sr.remoteSupervisors[node] = url
+func (sr *SupervisorRestful) AddRemoteSupervisors(remoteSupervisors map[string]*NodeLoginInfo) *SupervisorRestful {
+	for _, info := range remoteSupervisors {
+		sr.remoteSupervisors.AddNode(info)
 	}
 	return sr
 }
 
 // CreateProgramHandler create http handler to process program related restful request
 func (sr *SupervisorRestful) CreateProgramHandler() http.Handler {
-	sr.router.HandleFunc("/program/list", sr.ListProgram).Methods("GET")
-	sr.router.HandleFunc("/program/info/{node}/{name}", sr.GetProgramInfo).Methods("GET")
-	sr.router.HandleFunc("/program/start/{node}/{name}", sr.StartProgram).Methods("POST", "PUT")
-	sr.router.HandleFunc("/program/stop/{node}/{name}", sr.StopProgram).Methods("POST", "PUT")
-	sr.router.HandleFunc("/program/restart/{node}/{name}", sr.RestartProgram).Methods("POST", "PUT")
-	sr.router.HandleFunc("/program/log/{node}/{name}/stdout", sr.ReadStdoutLog).Methods("GET")
-	sr.router.HandleFunc("/program/log/{node}/{name}/stderr", sr.ReadStderrLog).Methods("GET")
-	sr.router.HandleFunc("/program/log/{name}/stdout", sr.ReadStdoutLog).Methods("GET")
-	sr.router.HandleFunc("/program/log/{name}/stderr", sr.ReadStderrLog).Methods("GET")
-	sr.router.HandleFunc("/program/startPrograms", sr.StartPrograms).Methods("POST", "PUT")
-	sr.router.HandleFunc("/program/stopPrograms", sr.StopPrograms).Methods("POST", "PUT")
-	return sr.router
+
+	router := mux.NewRouter()
+	router.HandleFunc("/program/list", sr.ListProgram).Methods("GET")
+	router.HandleFunc("/program/info/{node}/{name}", sr.GetProgramInfo).Methods("GET")
+	router.HandleFunc("/program/info/{name}", sr.GetProgramInfo).Methods("GET")
+	router.HandleFunc("/program/start/{node}/{name}", sr.StartProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/start/{name}", sr.StartProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/stop/{node}/{name}", sr.StopProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/stop/{name}", sr.StopProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/restart/{node}/{name}", sr.RestartProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/restart/{name}", sr.RestartProgram).Methods("POST", "PUT")
+	router.HandleFunc("/program/log_stdout/{node}/{name}", sr.ReadStdoutLog).Methods("GET")
+	router.HandleFunc("/program/log_stdout/{name}", sr.ReadStdoutLog).Methods("GET")
+	router.HandleFunc("/program/log_stderr/{node}/{name}", sr.ReadStderrLog).Methods("GET")
+	router.HandleFunc("/program/log_stderr/{name}", sr.ReadStderrLog).Methods("GET")
+	router.HandleFunc("/program/startPrograms", sr.StartPrograms).Methods("POST", "PUT")
+	router.HandleFunc("/program/stopPrograms", sr.StopPrograms).Methods("POST", "PUT")
+	return router
 }
 
 // CreateSupervisorHandler create http rest interface to control supervisor itself
 func (sr *SupervisorRestful) CreateSupervisorHandler() http.Handler {
-	sr.router.HandleFunc("/supervisor/listNodes", sr.ListNodes).Methods("GET")
-	sr.router.HandleFunc("/supervisor/{node}/ping", sr.PingNode).Methods("GET")
-	sr.router.HandleFunc("/supervisor/shutdown", sr.Shutdown).Methods("PUT", "POST")
-	sr.router.HandleFunc("/supervisor/reload", sr.Reload).Methods("PUT", "POST")
-	sr.router.HandleFunc("/supervisor/{node}/reload", sr.Reload).Methods("PUT", "POST")
-	sr.router.HandleFunc("/supervisor/{node}/shutdown", sr.Shutdown).Methods("PUT", "POST")
-	return sr.router
+	router := mux.NewRouter()
+	router.HandleFunc("/supervisor/listNodes", sr.ListNodes).Methods("GET")
+	router.HandleFunc("/supervisor/{node}/ping", sr.PingNode).Methods("GET")
+	router.HandleFunc("/supervisor/shutdown", sr.Shutdown).Methods("PUT", "POST")
+	router.HandleFunc("/supervisor/reload", sr.Reload).Methods("PUT", "POST")
+	router.HandleFunc("/supervisor/{node}/reload", sr.Reload).Methods("PUT", "POST")
+	router.HandleFunc("/supervisor/{node}/shutdown", sr.Shutdown).Methods("PUT", "POST")
+	return router
+}
+
+func (sr *SupervisorRestful) httpGet(url, user, password string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if user != "" && password != "" {
+		req.SetBasicAuth(user, password)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	return client.Do(req)
+}
+
+func (sr *SupervisorRestful) httpPost(url, user, password string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	if user != "" && password != "" {
+		req.SetBasicAuth(user, password)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
+	return client.Do(req)
 }
 
 func (sr *SupervisorRestful) PingNode(w http.ResponseWriter, req *http.Request) {
@@ -84,11 +183,11 @@ func (sr *SupervisorRestful) pingNode(node string) bool {
 		return true
 	}
 
-	url, ok := sr.remoteSupervisors[node]
+	loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 	if !ok {
 		return false
 	}
-	response, err := http.Get(url + "/supervisor/" + node + "/ping")
+	response, err := sr.httpGet(loginInfo.url+"/supervisor/"+node+"/ping", loginInfo.user, loginInfo.password)
 	if err != nil {
 		log.WithFields(log.Fields{"node": node}).Warn("failed to ping node: ", err)
 		return false
@@ -124,7 +223,7 @@ func (sr *SupervisorRestful) ListProgram(w http.ResponseWriter, req *http.Reques
 }
 
 func (sr *SupervisorRestful) ListNodes(w http.ResponseWriter, req *http.Request) {
-	nodes := make([]NodeInfo, 0)
+	nodes := make(map[string]NodeInfo)
 	cpuPercent, err := cpu.Percent(time.Second, false) // false = overall CPU usage
 	if err != nil {
 		log.Warn("failed to get CPU percent: ", err)
@@ -136,45 +235,54 @@ func (sr *SupervisorRestful) ListNodes(w http.ResponseWriter, req *http.Request)
 		vmStat = &mem.VirtualMemoryStat{Total: 0, Used: 0, UsedPercent: 0}
 	}
 
-	nodes = append(nodes, NodeInfo{
+	nodes[sr.supervisor.getNodeName()] = NodeInfo{
 		Name:           sr.supervisor.getNodeName(),
 		Status:         "ONLINE",
 		CpuPercent:     float32(cpuPercent[0]),
 		MemTotal:       int(vmStat.Total),
 		MemUsed:        float32(vmStat.Used),
 		MemUsedPercent: float32(vmStat.UsedPercent),
-	})
+	}
 
-	for node, url := range sr.remoteSupervisors {
-		nodeInfo, err := sr.listRemoteNodeInfo(node, url)
+	for node, loginInfo := range sr.remoteSupervisors.GetAllNode() {
+		nodeInfo, err := sr.listRemoteNodeInfo(loginInfo)
 		if err != nil {
-			log.WithFields(log.Fields{"node": node}).Warn("failed to get remote node info: ", err)
-			nodes = append(nodes, NodeInfo{
+			log.WithFields(log.Fields{"node": loginInfo.name}).Warn("failed to get remote node info: ", err)
+
+			nodes[node] = NodeInfo{
 				Name:           node,
 				Status:         "OFFLINE",
 				CpuPercent:     0,
 				MemTotal:       0,
 				MemUsed:        0,
 				MemUsedPercent: 0,
-			})
+			}
 		} else {
-			nodes = append(nodes, *nodeInfo)
+			for _, info := range nodeInfo {
+				nodes[info.Name] = info
+			}
 		}
 
 	}
 
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].Name < nodes[j].Name
+	nodesCopy := make([]NodeInfo, 0, len(nodes))
+	for _, info := range nodes {
+		nodesCopy = append(nodesCopy, info)
+	}
+
+	sort.Slice(nodesCopy, func(i, j int) bool {
+		return nodesCopy[i].Name < nodesCopy[j].Name
 	})
 	w.WriteHeader(200)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(nodes)
+	_ = json.NewEncoder(w).Encode(nodesCopy)
 }
 
-func (sr *SupervisorRestful) listRemoteNodeInfo(node, url string) (*NodeInfo, error) {
-	response, err := http.Get(url + "/supervisor/listNodes")
+func (sr *SupervisorRestful) listRemoteNodeInfo(loginInfo *NodeLoginInfo) ([]NodeInfo, error) {
+	url := fmt.Sprintf("%s/supervisor/listNodes", loginInfo.url)
+	response, err := sr.httpGet(url, loginInfo.user, loginInfo.password)
 	if err != nil {
-		log.WithFields(log.Fields{"node": node, "error": err}).Error("Fail to get node information")
+		log.WithFields(log.Fields{"node": loginInfo.name, "error": err}).Error("Fail to get node information")
 		return nil, err
 	}
 	defer response.Body.Close()
@@ -185,33 +293,42 @@ func (sr *SupervisorRestful) listRemoteNodeInfo(node, url string) (*NodeInfo, er
 	if err := json.NewDecoder(response.Body).Decode(&nodes); err != nil {
 		return nil, err
 	}
+
+	nodeNameChanged := true
+
 	for _, nodeInfo := range nodes {
-		if nodeInfo.Name == node {
-			return &nodeInfo, nil
+		if nodeInfo.Name == loginInfo.name {
+			nodeNameChanged = false
 		}
+		sr.remoteSupervisors.AddNode(NewNodeLoginInfo(nodeInfo.Name, loginInfo.url, loginInfo.user, loginInfo.password))
 	}
-	return nil, fmt.Errorf("node not found")
+
+	if nodeNameChanged {
+		sr.remoteSupervisors.RemoveNode(loginInfo.name)
+	}
+
+	return nodes, nil
 }
 
 func (sr *SupervisorRestful) listRemotePrograms() []types.ProcessInfo {
 	programs := make([]types.ProcessInfo, 0)
 
-	for node, url := range sr.remoteSupervisors {
-		response, err := http.Get(url + "/program/list")
+	for node, loginInfo := range sr.remoteSupervisors.GetAllNode() {
+		url := fmt.Sprintf("%s/program/list", loginInfo.url)
+		response, err := sr.httpGet(url, loginInfo.user, loginInfo.password)
 		if err == nil && response.StatusCode >= 200 && response.StatusCode < 400 {
 			var result []types.ProcessInfo
 
 			defer response.Body.Close()
 			if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-				log.WithFields(log.Fields{"node": node, "url": url}).Warn("failed to decode remote program list: ", err)
+				log.WithFields(log.Fields{"node": node, "url": loginInfo.url}).Warn("failed to decode remote program list: ", err)
 			} else {
 				for _, program := range result {
-					program.Node = node
 					programs = append(programs, program)
 				}
 			}
 		} else {
-			log.WithFields(log.Fields{"node": node, "url": url}).Warn("failed to list programs on remote node: ", err)
+			log.WithFields(log.Fields{"node": node, "url": loginInfo.url, "error": err}).Warn("failed to list programs on remote node")
 		}
 	}
 	return programs
@@ -256,11 +373,12 @@ func (sr *SupervisorRestful) GetProgramInfo(w http.ResponseWriter, req *http.Req
 }
 
 func (sr *SupervisorRestful) getRemoteProgramInfo(node, programName string) (*types.ProcessInfo, error) {
-	url, ok := sr.remoteSupervisors[node]
+	loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 	if !ok {
 		return nil, fmt.Errorf("failed to find remote supervisor for node: %s", node)
 	}
-	response, err := http.Get(url + "/program/info/" + node + "/" + programName)
+	url := fmt.Sprintf("%s/program/info/%s/%s", loginInfo.url, node, programName)
+	response, err := sr.httpGet(url, loginInfo.user, loginInfo.password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get program info from remote node: %v", err)
 	}
@@ -296,12 +414,13 @@ func (sr *SupervisorRestful) _startProgram(node, program string) (bool, error) {
 		return result.Success, err
 	} else {
 		// start the program on the remote supervisor
-		url, ok := sr.remoteSupervisors[node]
+		loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 		if !ok {
 			log.WithFields(log.Fields{"node": node, "program": program}).Error("Fail to find node")
 			return false, nil
 		}
-		response, err := http.Post(url+"/program/start/"+node+"/"+program, "application/json", nil)
+		url := fmt.Sprintf("%s/program/start/%s/%s", loginInfo.url, node, program)
+		response, err := sr.httpPost(url, loginInfo.user, loginInfo.password, nil)
 		if err != nil {
 			log.WithFields(log.Fields{"node": node, "program": program}).Warn("failed to start program on remote node: ", err)
 			return false, err
@@ -361,12 +480,13 @@ func (sr *SupervisorRestful) _stopProgram(node, programName string) (bool, error
 		return result.Success, err
 	} else {
 		// stop the program on the remote supervisor
-		url, ok := sr.remoteSupervisors[node]
+		loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 		if !ok {
 			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to find remote supervisor")
 			return false, nil
 		}
-		response, err := http.Post(url+"/program/stop/"+node+"/"+programName, "application/json", nil)
+		url := fmt.Sprintf("%s/program/stop/%s/%s", loginInfo.url, node, programName)
+		response, err := sr.httpPost(url, loginInfo.user, loginInfo.password, nil)
 		if err != nil {
 			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to stop program on remote node: ", err)
 			return false, err
@@ -435,49 +555,72 @@ func (sr *SupervisorRestful) StopPrograms(w http.ResponseWriter, req *http.Reque
 
 }
 
+func (sr *SupervisorRestful) readLog(node, programName, logType string) (string, error) {
+	if node == "" || node == sr.supervisor.getNodeName() {
+		readInfo := ProcessLogReadInfo{Name: programName, Offset: 0, Length: 0}
+		reply := struct{ LogData string }{LogData: ""}
+		var err error
+		switch logType {
+		case "stdout":
+			err = sr.supervisor.ReadProcessStdoutLog(nil, &readInfo, &reply)
+		case "stderr":
+			err = sr.supervisor.ReadProcessStderrLog(nil, &readInfo, &reply)
+		default:
+			return "", fmt.Errorf("invalid log type: %s", logType)
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to read %s log: %v", logType, err)
+		}
+		return reply.LogData, nil
+	} else {
+		return sr.readRemoteLog(node, programName, logType)
+	}
+}
+
 // ReadStdoutLog read the stdout of given program
 func (sr *SupervisorRestful) ReadStdoutLog(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 	params := mux.Vars(req)
 	node := params["node"]
 	programName := params["name"]
-	if node == "" || node == sr.supervisor.getNodeName() {
-		readInfo := ProcessLogReadInfo{Name: programName, Offset: 0, Length: 0}
-		reply := struct{ LogData string }{LogData: ""}
-		err := sr.supervisor.ReadProcessStdoutLog(req, &readInfo, &reply)
-		if err != nil {
-			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to read stdout log: ", err)
-		}
-		w.WriteHeader(200)
-		w.Write([]byte(reply.LogData))
+	logData, err := sr.readLog(node, programName, "stdout")
+
+	if err != nil {
+		w.WriteHeader(500)
+		_, _ = fmt.Fprintf(w, "failed to read log: %v", err)
 	} else {
-		// read the stdout log from the remote supervisor
-		logData, err := sr.readRemoteLog(node, programName, "stdout")
-		if err != nil {
-			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to read remote stdout log: ", err)
-		}
 		w.WriteHeader(200)
-		w.Write([]byte(logData))
+		_, _ = w.Write([]byte(logData))
 	}
+
 }
 
 func (sr *SupervisorRestful) readRemoteLog(node, programName, logType string) (string, error) {
-	url, ok := sr.remoteSupervisors[node]
+	loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 	if !ok {
+		log.WithFields(log.Fields{"node": node, "program": programName, "log-type": logType}).Error("failed to find remote supervisor")
 		return "", fmt.Errorf("not a valid node")
 	}
-	resp, err := http.Get(fmt.Sprintf("%s/program/log/%s/%s/%s", url, node, programName, logType))
+	url := fmt.Sprintf("%s/program/log_stdout/%s/%s", loginInfo.url, node, programName)
+	if logType == "stderr" {
+		url = fmt.Sprintf("%s/program/log_stderr/%s/%s", loginInfo.url, node, programName)
+	}
+
+	resp, err := sr.httpGet(url, loginInfo.user, loginInfo.password)
 	if err != nil {
+		log.WithFields(log.Fields{"node": node, "url": url, "error": err, "program": programName, "log-type": logType}).Error("failed to read remote log")
 		return "", fmt.Errorf("failed to read remote %s log: %v", logType, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.WithFields(log.Fields{"node": node, "url": url, "statusCode": resp.StatusCode, "program": programName, "log-type": logType}).Error("failed to read remote log: status code not OK")
 		return "", fmt.Errorf("failed to read remote %s log: status code %d", logType, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.WithFields(log.Fields{"node": node, "url": url, "error": err, "program": programName, "log-type": logType}).Error("failed to read remote log")
 		return "", fmt.Errorf("failed to read remote %s log: %v", logType, err)
 	}
 	return string(data), nil
@@ -488,23 +631,13 @@ func (sr *SupervisorRestful) ReadStderrLog(w http.ResponseWriter, req *http.Requ
 	params := mux.Vars(req)
 	node := params["node"]
 	programName := params["name"]
-	if node == "" || node == sr.supervisor.getNodeName() {
-		readInfo := ProcessLogReadInfo{Name: programName, Offset: 0, Length: 0}
-		reply := struct{ LogData string }{LogData: ""}
-		err := sr.supervisor.ReadProcessStderrLog(req, &readInfo, &reply)
-		if err != nil {
-			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to read stderr log: ", err)
-		}
-		w.WriteHeader(200)
-		w.Write([]byte(reply.LogData))
+	logData, err := sr.readLog(node, programName, "stderr")
+	if err != nil {
+		w.WriteHeader(500)
+		_, _ = fmt.Fprintf(w, "failed to read log: %v", err)
 	} else {
-		// read the stderr log from the remote supervisor
-		logData, err := sr.readRemoteLog(node, programName, "stderr")
-		if err != nil {
-			log.WithFields(log.Fields{"node": node, "program": programName}).Warn("failed to read remote stderr log: ", err)
-		}
 		w.WriteHeader(200)
-		w.Write([]byte(logData))
+		_, _ = w.Write([]byte(logData))
 	}
 }
 
@@ -541,11 +674,12 @@ func (sr *SupervisorRestful) Shutdown(w http.ResponseWriter, req *http.Request) 
 }
 
 func (sr *SupervisorRestful) shutdownRemote(node string) (bool, error) {
-	url, ok := sr.remoteSupervisors[node]
+	loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 	if !ok {
 		return false, fmt.Errorf("not a valid node")
 	}
-	response, err := http.Post(url+"/supervisor/shutdown", "application/json", nil)
+	url := fmt.Sprintf("%s/supervisor/%s/shutdown", loginInfo.url, node)
+	response, err := sr.httpPost(url, loginInfo.user, loginInfo.password, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to shutdown remote supervisor: %v", err)
 	}
@@ -591,20 +725,21 @@ func (sr *SupervisorRestful) Reload(w http.ResponseWriter, req *http.Request) {
 
 func (sr *SupervisorRestful) reloadRemote(node string) (bool, error) {
 
-	url, ok := sr.remoteSupervisors[node]
+	loginInfo, ok := sr.remoteSupervisors.GetNode(node)
 	if !ok {
 		return false, fmt.Errorf("not a valid node")
 	}
-	response, err := http.Post(url+"/supervisor/reload", "application/json", nil)
+	url := fmt.Sprintf("%s/supervisor/%s/reload", loginInfo.url, node)
+	response, err := sr.httpPost(url, loginInfo.user, loginInfo.password, nil)
 	if err != nil {
-		log.WithFields(log.Fields{"node": node, "url": url}).Warn("failed to reload remote supervisor: ", err)
+		log.WithFields(log.Fields{"node": node, "url": loginInfo.url}).Warn("failed to reload remote supervisor: ", err)
 		return false, fmt.Errorf("failed to reload remote supervisor: %v", err)
 	}
 	defer response.Body.Close()
 
 	result := struct{ Success bool }{false}
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		log.WithFields(log.Fields{"node": node, "url": url}).Warn("failed to decode response from remote node: ", err)
+		log.WithFields(log.Fields{"node": node, "url": loginInfo.url}).Warn("failed to decode response from remote node: ", err)
 		return false, fmt.Errorf("failed to decode response from remote node: %v", err)
 	}
 	return result.Success, nil
