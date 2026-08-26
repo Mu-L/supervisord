@@ -1124,6 +1124,7 @@ func (p *Process) createStdoutLogger() logger.Logger {
 	logFile := p.GetStdoutLogfile()
 	maxBytes := int64(p.config.GetBytes("stdout_logfile_maxbytes", 50*1024*1024))
 	backups := p.config.GetInt("stdout_logfile_backups", 10)
+	fileNameWithTimestamp := p.config.GetBool("stdout_logfile_timestamp_suffix", true)
 	logEventEmitter := p.createStdoutLogEventEmitter()
 	props := make(map[string]string)
 	syslog_facility := p.config.GetString("syslog_facility", "")
@@ -1142,13 +1143,14 @@ func (p *Process) createStdoutLogger() logger.Logger {
 
 	log.WithFields(log.Fields{"program": p.GetName(), "logFile": logFile}).Info("create stdout logger")
 
-	return logger.NewLogger(p.GetName(), logFile, logger.NewNullLocker(), maxBytes, backups, props, logEventEmitter)
+	return logger.NewLogger(p.GetName(), logFile, logger.NewNullLocker(), maxBytes, backups, fileNameWithTimestamp, props, logEventEmitter)
 }
 
 func (p *Process) createStderrLogger() logger.Logger {
 	logFile := p.GetStderrLogfile()
 	maxBytes := int64(p.config.GetBytes("stderr_logfile_maxbytes", 50*1024*1024))
 	backups := p.config.GetInt("stderr_logfile_backups", 10)
+	fileNameWithTimestamp := p.config.GetBool("stderr_logfile_timestamp_suffix", true)
 	logEventEmitter := p.createStderrLogEventEmitter()
 	props := make(map[string]string)
 	syslog_facility := p.config.GetString("syslog_facility", "")
@@ -1165,7 +1167,7 @@ func (p *Process) createStderrLogger() logger.Logger {
 		props["syslog_priority"] = syslog_priority
 	}
 
-	return logger.NewLogger(p.GetName(), logFile, logger.NewNullLocker(), maxBytes, backups, props, logEventEmitter)
+	return logger.NewLogger(p.GetName(), logFile, logger.NewNullLocker(), maxBytes, backups, fileNameWithTimestamp, props, logEventEmitter)
 }
 
 func (p *Process) setUser() error {

@@ -13,9 +13,18 @@ username=test1
 password={SHA}82ab876d1387bfafe46cc1c8a2ef074eae50cb1d
 
 [inet_http_server]
+nodename=node-1
 port=127.0.0.1:9001
 username=test1
 password=thepassword
+remote_1_node=node-2
+remote_1_port=127.0.0.1:9002
+remote_1_user=test
+remote_1_password=thepassword
+remote_2_node=node-3
+remote_2_port=127.0.0.1:9003
+remote_2_user=test
+remote_2_password=thepassword
 
 [supervisord]
 logfile=%(here)s/supervisord.log
@@ -54,11 +63,13 @@ redirect_stderr=false
 stdout_logfile=AUTO
 stdout_logfile_maxbytes=50MB
 stdout_logfile_backups=10
+stdout_logfile_timestamp_suffix=tue
 stdout_capture_maxbytes=0
 stdout_events_enabled=true
 stderr_logfile=AUTO
 stderr_logfile_maxbytes=50MB
 stderr_logfile_backups=10
+stderr_logfile_timestamp_suffix=tue
 stderr_capture_maxbytes=0
 stderr_events_enabled=false
 environment=KEY="val",KEY2="val2"

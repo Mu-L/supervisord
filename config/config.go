@@ -525,11 +525,12 @@ func (c *Entry) GetBytes(key string, defValue int) int {
 	if ok {
 		if len(v) > 2 {
 			lastTwoBytes := v[len(v)-2:]
-			if lastTwoBytes == "MB" {
+			switch lastTwoBytes {
+			case "MB":
 				return toInt(v[:len(v)-2], 1024*1024, defValue)
-			} else if lastTwoBytes == "GB" {
+			case "GB":
 				return toInt(v[:len(v)-2], 1024*1024*1024, defValue)
-			} else if lastTwoBytes == "KB" {
+			case "KB":
 				return toInt(v[:len(v)-2], 1024, defValue)
 			}
 		}
