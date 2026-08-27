@@ -74,8 +74,13 @@ func (c *Entry) GetPrograms() []string {
 	return make([]string, 0)
 }
 
-func (c *Entry) setGroup(group string) {
-	c.Group = group
+func (c *Entry) ContainProgram(program string) bool {
+	for _, p := range c.GetPrograms() {
+		if p == program {
+			return true
+		}
+	}
+	return false
 }
 
 // String dumps configuration as a string
@@ -87,13 +92,33 @@ func (c *Entry) String() string {
 	return buf.String()
 }
 
+// Determine if this entry is exactly same as the other entry. The name, group and all the key-values must be the same.
+func (c *Entry) IsSame(other *Entry) bool {
+	if c.Name != other.Name {
+		return false
+	}
+	if c.Group != other.Group {
+		return false
+	}
+	if len(c.keyValues) != len(other.keyValues) {
+		return false
+	}
+
+	for k, v := range c.keyValues {
+		if otherV, ok := other.keyValues[k]; !ok || v != otherV {
+			return false
+		}
+	}
+	return true
+}
+
 // Config memory representation of supervisor configuration file
 type Config struct {
 	configFile string
 	// mapping between the section name and configuration entry
 	entries map[string]*Entry
 
-	ProgramGroup *ProcessGroup
+	//ProgramGroup *ProcessGroup
 }
 
 // NewEntry creates configuration entry
@@ -103,7 +128,7 @@ func NewEntry(configDir string) *Entry {
 
 // NewConfig creates Config object
 func NewConfig(configFile string) *Config {
-	return &Config{configFile, make(map[string]*Entry), NewProcessGroup()}
+	return &Config{configFile, make(map[string]*Entry)}
 }
 
 // create a new entry or return the already-exist entry
@@ -120,7 +145,7 @@ func (c *Config) createEntry(name string, configDir string) *Entry {
 // Load the configuration and return loaded programs
 func (c *Config) Load() ([]string, error) {
 	myini := ini.NewIni()
-	c.ProgramGroup = NewProcessGroup()
+	//c.ProgramGroup = NewProcessGroup()
 	log.WithFields(log.Fields{"file": c.configFile}).Info("load configuration from file")
 	myini.LoadFile(c.configFile)
 
@@ -130,6 +155,35 @@ func (c *Config) Load() ([]string, error) {
 		myini.LoadFile(f)
 	}
 	return c.parse(myini), nil
+}
+
+func (c *Config) GetGroups() []string {
+	groups := make([]string, 0)
+	for _, entry := range c.entries {
+		if entry.IsGroup() {
+			groups = append(groups, entry.GetGroupName())
+		}
+	}
+
+	return groups
+}
+
+func (c *Config) GetGroupProgram(group string) []string {
+	for _, entry := range c.entries {
+		if entry.IsGroup() && entry.GetGroupName() == group {
+			return entry.GetPrograms()
+		}
+	}
+	return make([]string, 0)
+}
+
+func (c *Config) GetProgramGroup(program string, defGroup string) string {
+	for _, entry := range c.entries {
+		if entry.ContainProgram(program) {
+			return entry.GetGroupName()
+		}
+	}
+	return defGroup
 }
 
 func (c *Config) getIncludeFiles(cfg *ini.Ini) []string {
@@ -205,6 +259,10 @@ func (c *Config) GetConfigFileDir() string {
 	return filepath.Dir(c.configFile)
 }
 
+func (c *Config) GetConfigFile() string {
+	return c.configFile
+}
+
 // convert supervisor file pattern to the go regrexp
 func toRegexp(pattern string) string {
 	tmp := strings.Split(pattern, ".")
@@ -251,8 +309,39 @@ func (c *Config) GetEntries(filterFunc func(entry *Entry) bool) []*Entry {
 	return result
 }
 
-// GetGroups returns configuration entries of all program groups
-func (c *Config) GetGroups() []*Entry {
+// GetAllEntries returns all configuration entries
+func (c *Config) GetAllEntries() []*Entry {
+	result := make([]*Entry, 0)
+	for _, entry := range c.entries {
+		result = append(result, entry)
+	}
+	return result
+
+}
+
+func (c *Config) AddEntry(entry *Entry) (*Entry, bool) {
+	if existingEntry, ok := c.entries[entry.Name]; !ok || !existingEntry.IsSame(entry) {
+		c.entries[entry.Name] = entry
+		return entry, true
+	}
+	return nil, false
+}
+
+func (c *Config) RemoveEntry(name string) (*Entry, bool) {
+	if existingEntry, ok := c.entries[name]; ok {
+		delete(c.entries, name)
+		return existingEntry, true
+	}
+	return nil, false
+}
+
+func (c *Config) GetEntry(name string) (*Entry, bool) {
+	entry, ok := c.entries[name]
+	return entry, ok
+}
+
+// GetGroupEntries returns configuration entries of all program groups
+func (c *Config) GetGroupEntries() []*Entry {
 	return c.GetEntries(func(entry *Entry) bool {
 		return entry.IsGroup()
 	})
@@ -553,11 +642,6 @@ func (c *Config) parseGroup(cfg *ini.Ini) {
 		if strings.HasPrefix(section.Name, "group:") {
 			entry := c.createEntry(section.Name, c.GetConfigFileDir())
 			entry.parse(section)
-			groupName := entry.GetGroupName()
-			programs := entry.GetPrograms()
-			for _, program := range programs {
-				c.ProgramGroup.Add(groupName, program)
-			}
 		}
 	}
 }
@@ -593,7 +677,7 @@ func (c *Config) parseProgram(cfg *ini.Ini) []string {
 			}
 			procName, err := section.GetValue("process_name")
 			if numProcs > 1 {
-				if err != nil || strings.Index(procName, "%(process_num)") == -1 {
+				if err != nil || !strings.Contains(procName, "%(process_num)") {
 					log.WithFields(log.Fields{
 						"numprocs":     numProcs,
 						"process_name": procName,
@@ -610,7 +694,7 @@ func (c *Config) parseProgram(cfg *ini.Ini) []string {
 			for i := 1; i <= numProcs; i++ {
 				envs := NewStringExpression("program_name", programName,
 					"process_num", fmt.Sprintf("%d", i),
-					"group_name", c.ProgramGroup.GetGroup(programName, programName),
+					"group_name", c.GetProgramGroup(programName, programName),
 					"here", c.GetConfigFileDir())
 				envValue, err := section.GetValue("environment")
 				if err == nil {
@@ -643,7 +727,7 @@ func (c *Config) parseProgram(cfg *ini.Ini) []string {
 				entry := c.createEntry(procName, c.GetConfigFileDir())
 				entry.parse(section)
 				entry.Name = prefix + procName
-				group := c.ProgramGroup.GetGroup(programName, programName)
+				group := c.GetProgramGroup(programName, programName)
 				entry.Group = group
 				loadedPrograms = append(loadedPrograms, procName)
 			}
@@ -665,5 +749,4 @@ func (c *Config) String() string {
 // RemoveProgram removes program entry by its name
 func (c *Config) RemoveProgram(programName string) {
 	delete(c.entries, programName)
-	c.ProgramGroup.Remove(programName)
 }

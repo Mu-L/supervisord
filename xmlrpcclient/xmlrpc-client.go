@@ -542,3 +542,44 @@ func (r *XMLRPCClient) GetForgroundStdout(process, id string) (reply struct{ Log
 	})
 	return
 }
+
+func (r *XMLRPCClient) Restart() (reply struct{ Success bool }, err error) {
+	ins := struct{}{}
+	r.post("supervisor.restart", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}
+
+func (r *XMLRPCClient) AddProcessGroup(group string) (reply struct{ Success bool }, err error) {
+	ins := struct {
+		Name string
+	}{
+		Name: group,
+	}
+	r.post("supervisor.addProcessGroup", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}
+
+func (r *XMLRPCClient) RemoveProcessGroup(group string) (reply struct{ Success bool }, err error) {
+	ins := struct {
+		Name string
+	}{
+		Name: group,
+	}
+	r.post("supervisor.removeProcessGroup", &ins, func(body io.ReadCloser, procError error) {
+		err = procError
+		if err == nil {
+			err = xml.DecodeClientResponse(body, &reply)
+		}
+	})
+	return
+}

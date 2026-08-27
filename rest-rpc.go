@@ -701,7 +701,10 @@ func (sr *SupervisorRestful) Reload(w http.ResponseWriter, req *http.Request) {
 
 	if node == "" || node == sr.supervisor.getNodeName() {
 		log.Info("reload supervisor configuration")
-		_, _, _, err := sr.supervisor.Reload(false)
+		args := struct{}{}
+		reply := types.ReloadConfigResult{}
+
+		err := sr.supervisor.ReloadConfig(req, &args, &reply)
 		if err != nil {
 			log.Warn("reload error: ", err)
 		}

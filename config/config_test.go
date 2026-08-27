@@ -110,10 +110,10 @@ func TestGetEnvValueFromConfig(t *testing.T) {
 }
 
 func TestGetBytesFromConfig(t *testing.T) {
-	config, _ := parse([]byte("[program:test]\nA=1024\nB=2KB\nC=3MB\nD=4GB\nE=test"))
+	config, _ := parse([]byte("[program:test]\nA=1024\nB=2KB\nC=3MB\nD=1GB\nE=test"))
 	entry := config.GetProgram("test")
 
-	if entry.GetBytes("A", 0) != 1024 || entry.GetBytes("B", 0) != 2048 || entry.GetBytes("C", 0) != 3*1024*1024 || entry.GetBytes("D", 0) != 4*1024*1024*1024 || entry.GetBytes("E", 0) != 0 || entry.GetBytes("F", -1) != -1 {
+	if entry.GetBytes("A", 0) != 1024 || entry.GetBytes("B", 0) != 2048 || entry.GetBytes("C", 0) != 3*1024*1024 || entry.GetBytes("D", 0) != 1*1024*1024*1024 || entry.GetBytes("E", 0) != 0 || entry.GetBytes("F", -1) != -1 {
 		t.Error("Fail to get bytes")
 	}
 

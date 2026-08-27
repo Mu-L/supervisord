@@ -112,7 +112,7 @@ func readFile(path string) ([]byte, error) {
 }
 
 func getProgramConfigPath(programName string, s *Supervisor) string {
-	c := s.config.GetProgram(programName)
+	c := s.activeConfig.GetProgram(programName)
 	if c == nil {
 		return ""
 	}
@@ -198,7 +198,7 @@ func (p *XMLRPC) startHTTPServer(user string, password string, protocol string, 
 	mux.Handle("/metrics", promhttp.Handler())
 
 	// 注册日志路由,可以查看日志目录
-	entryList := s.config.GetPrograms()
+	entryList := s.activeConfig.GetPrograms()
 	for _, c := range entryList {
 		realName := c.GetProgramName()
 		if realName == "" {

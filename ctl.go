@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,81 @@ type CtlCommand struct {
 	User      string `short:"u" long:"user" description:"the user name"`
 	Password  string `short:"P" long:"password" description:"the password"`
 	Verbose   bool   `short:"v" long:"verbose" description:"Show verbose debug information"`
+}
+
+func (x CtlCommand) remove(client *xmlrpcclient.XMLRPCClient, programs []string) {
+	x.update(client, programs)
+}
+
+func (x CtlCommand) add(client *xmlrpcclient.XMLRPCClient, programs []string) {
+	x.update(client, programs)
+}
+
+func (x CtlCommand) update(client *xmlrpcclient.XMLRPCClient, groups []string) {
+	if len(groups) == 0 || slices.Contains(groups, "all") {
+		result, err := client.ReloadConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+		} else {
+			changedGroups := make([]string, 0)
+			changedGroups = append(changedGroups, result.AddedGroup...)
+			changedGroups = append(changedGroups, result.ChangedGroup...)
+			for _, group := range changedGroups {
+				reply, err := client.AddProcessGroup(group)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Fail to add process group %s: %v\n", group, err)
+				} else if !reply.Success {
+					fmt.Fprintf(os.Stderr, "Fail to add process group %s\n", group)
+				} else {
+					fmt.Printf("Process group %s is added successfully\n", group)
+				}
+			}
+
+			for _, group := range result.RemovedGroup {
+				reply, err := client.RemoveProcessGroup(group)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Fail to remove process group %s: %v\n", group, err)
+				} else if !reply.Success {
+					fmt.Fprintf(os.Stderr, "Fail to remove process group %s\n", group)
+				} else {
+					fmt.Printf("Process group %s is removed successfully\n", group)
+				}
+			}
+		}
+	} else {
+		for _, group := range groups {
+			if group == "all" {
+				continue
+			}
+			reply, err := client.AddProcessGroup(group)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Fail to add process group %s: %v\n", group, err)
+			} else if !reply.Success {
+				fmt.Fprintf(os.Stderr, "Fail to add process group %s\n", group)
+			} else {
+				fmt.Printf("Process group %s is added successfully\n", group)
+			}
+		}
+
+	}
+}
+
+type AddCommand struct {
+	Args struct {
+		Programs []string `positional-arg-name:"Program" description:"Name of the Program/Group"`
+	} `positional-args:"yes" required:"yes"`
+}
+
+type RemoveCommand struct {
+	Args struct {
+		Programs []string `positional-arg-name:"Program" description:"Name of the Program/Group"`
+	} `positional-args:"yes" required:"yes"`
+}
+
+type ClearCommand struct {
+	Args struct {
+		Programs []string `positional-arg-name:"Program" description:"Name of the Program"`
+	} `positional-args:"yes" required:"yes"`
 }
 
 // StatusCommand get the status of all supervisor managed programs
@@ -70,6 +146,15 @@ type ShutdownCommand struct {
 type ReloadCommand struct {
 }
 
+type RereadCommand struct {
+}
+
+type UpdateCommand struct {
+	Args struct {
+		Groups []string `positional-arg-name:"Group" description:"Name of the Process Group"`
+	} `positional-args:"yes" required:"no"`
+}
+
 // PidCommand get the pid of program
 type PidCommand struct {
 	Args struct {
@@ -100,14 +185,19 @@ type ForegroundCommand struct {
 }
 
 var ctlCommand CtlCommand
+var addCommand AddCommand
+var removeCommand RemoveCommand
+var clearCommand ClearCommand
 var statusCommand StatusCommand
 var startCommand StartCommand
 var stopCommand StopCommand
 var startGroupCommand StartGroupCommand
 var stopGroupCommand StopGroupCommand
 var restartCommand RestartCommand
+var updateCommand UpdateCommand
 var shutdownCommand ShutdownCommand
 var reloadCommand ReloadCommand
+var rereadCommand RereadCommand
 var pidCommand PidCommand
 var signalCommand SignalCommand
 var logtailCommand LogtailCommand
@@ -263,17 +353,34 @@ func (x *CtlCommand) _startStopProcesses(rpcc *xmlrpcclient.XMLRPCClient, verb s
 				fmt.Printf("Fail to change all process state to %s", state)
 			}
 		} else {
-			if reply, err := rpcc.ChangeProcessState(verb, pname); err == nil {
-				if showProcessInfo {
-					fmt.Printf("%s: ", pname)
-					if !reply.Value {
-						fmt.Printf("not ")
+			pos := strings.Index(pname, ":")
+			if pos != -1 {
+				groupName := pname[0:pos]
+				programName := pname[pos+1:]
+				if programName == "*" {
+					reply, err := rpcc.ChangeProcessGroupState(verb, groupName)
+					if err == nil {
+						if showProcessInfo {
+							x.showProcessInfo(&reply, make(map[string]bool))
+						}
+					} else {
+						fmt.Printf("Fail to change process group %s state to %s", groupName, state)
 					}
-					fmt.Printf("%s\n", state)
 				}
 			} else {
-				fmt.Printf("%s: failed [%v]\n", pname, err)
-				os.Exit(1)
+
+				if reply, err := rpcc.ChangeProcessState(verb, pname); err == nil {
+					if showProcessInfo {
+						fmt.Printf("%s: ", pname)
+						if !reply.Value {
+							fmt.Printf("not ")
+						}
+						fmt.Printf("%s\n", state)
+					}
+				} else {
+					fmt.Printf("%s: failed [%v]\n", pname, err)
+					os.Exit(1)
+				}
 			}
 		}
 	}
@@ -316,6 +423,21 @@ func (x *CtlCommand) shutdown(rpcc *xmlrpcclient.XMLRPCClient) {
 
 // reload all the programs in the supervisord
 func (x *CtlCommand) reload(rpcc *xmlrpcclient.XMLRPCClient) {
+	if reply, err := rpcc.Restart(); err == nil {
+
+		if reply.Success {
+			fmt.Printf("Supervisord is reloaded successfully\n")
+		} else {
+			fmt.Printf("Fail to reload supervisord\n")
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
+	}
+}
+
+// reload all the programs in the supervisord
+func (x *CtlCommand) reread(rpcc *xmlrpcclient.XMLRPCClient) {
 	if reply, err := rpcc.ReloadConfig(); err == nil {
 
 		if len(reply.AddedGroup) > 0 {
@@ -496,6 +618,37 @@ func (x *CtlCommand) getANSIColor(statename string) string {
 	}
 }
 
+func (ac *AddCommand) Execute(args []string) error {
+	ctlCommand.add(ctlCommand.createRPCClient(), ac.Args.Programs)
+	return nil
+}
+
+func (rc *RemoveCommand) Execute(args []string) error {
+	ctlCommand.remove(ctlCommand.createRPCClient(), rc.Args.Programs)
+	return nil
+}
+
+func (cc *ClearCommand) Execute(args []string) error {
+
+	client := ctlCommand.createRPCClient()
+	logTypes := []string{"stdout", "stderr"}
+	for _, program := range cc.Args.Programs {
+		for _, logType := range logTypes {
+			reply, err := client.ClearProcessLog(program, logType)
+			if err != nil {
+				fmt.Printf("Fail to clear %s log of program %s: %v\n", logType, program, err)
+			} else {
+				if reply.Success {
+					fmt.Printf("Succeed to clear %s log of program %s\n", logType, program)
+				} else {
+					fmt.Printf("Fail to clear %s log of program %s\n", logType, program)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Execute implements flags.Commander interface to get status of program
 func (sc *StatusCommand) Execute(args []string) error {
 	ctlCommand.status(ctlCommand.createRPCClient(), sc.Args.Programs)
@@ -531,6 +684,12 @@ func (rc *RestartCommand) Execute(args []string) error {
 	return nil
 }
 
+// Execute update the supervisord configuration and start programs
+func (rc *UpdateCommand) Execute(args []string) error {
+	ctlCommand.update(ctlCommand.createRPCClient(), rc.Args.Groups)
+	return nil
+}
+
 // Execute shutdown the supervisor
 func (sc *ShutdownCommand) Execute(args []string) error {
 	ctlCommand.shutdown(ctlCommand.createRPCClient())
@@ -540,6 +699,11 @@ func (sc *ShutdownCommand) Execute(args []string) error {
 // Execute stop the running programs and reload the supervisor configuration
 func (rc *ReloadCommand) Execute(args []string) error {
 	ctlCommand.reload(ctlCommand.createRPCClient())
+	return nil
+}
+
+func (rc *RereadCommand) Execute(args []string) error {
+	ctlCommand.reread(ctlCommand.createRPCClient())
 	return nil
 }
 
@@ -576,6 +740,18 @@ func init() {
 		"show program status",
 		"show all or some program status",
 		&statusCommand)
+	_, _ = ctlCmd.AddCommand("add",
+		"Activates any updates in config for process/group",
+		"Activates any updates in config for process/group",
+		&addCommand)
+	_, _ = ctlCmd.AddCommand("remove",
+		"Deactivates any updates in config for process/group",
+		"Deactivates any updates in config for process/group",
+		&removeCommand)
+	_, _ = ctlCmd.AddCommand("clear",
+		"clear the stdout/stderr log of the program",
+		"clear the stdout/stderr log of the program",
+		&clearCommand)
 	_, _ = ctlCmd.AddCommand("start",
 		"start programs",
 		"start one or more programs",
@@ -604,10 +780,14 @@ func init() {
 		"reload the supervisord configuration and start programs",
 		"reload the supervisord configuration and start programs",
 		&reloadCommand)
+	_, _ = ctlCmd.AddCommand("reread",
+		"Reload the daemon’s configuration files, without add/remove (no restarts)",
+		"Reload the daemon’s configuration files, without add/remove (no restarts)",
+		&rereadCommand)
 	_, _ = ctlCmd.AddCommand("update",
 		"reload the supervisord configuration and start programs",
 		"reload the supervisord configuration and start programs",
-		&reloadCommand)
+		&updateCommand)
 	_, _ = ctlCmd.AddCommand("signal",
 		"send signal to program",
 		"send signal to program",

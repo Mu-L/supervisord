@@ -26,15 +26,23 @@ const (
 	SupervisorVersion = "3.0"
 )
 
+type ReloadAction int
+
+const (
+	RestartAll ReloadAction = iota
+	RestartChanged
+)
+
 // Supervisor manage all the processes defined in the supervisor configuration file.
 // All the supervisor public interface is defined in this class
 type Supervisor struct {
-	config     *config.Config   // supervisor configuration
-	procMgr    *process.Manager // process manager
-	xmlRPC     *XMLRPC          // XMLRPC interface
-	logger     logger.Logger    // logger manager
-	lock       sync.Mutex
-	restarting atomic.Bool // if supervisor is in restarting state
+	activeConfig  *config.Config   // supervisor configuration
+	pendingConfig *config.Config   // pending configuration when reloading
+	procMgr       *process.Manager // process manager
+	xmlRPC        *XMLRPC          // XMLRPC interface
+	logger        logger.Logger    // logger manager
+	lock          sync.Mutex
+	restarting    atomic.Bool // if supervisor is in restarting state
 }
 
 // StartProcessArgs arguments for starting a process
@@ -91,14 +99,15 @@ type ProcessTailLog struct {
 
 // NewSupervisor create a Supervisor object with supervisor configuration file
 func NewSupervisor(configFile string) *Supervisor {
-	return &Supervisor{config: config.NewConfig(configFile),
-		procMgr: process.NewManager(),
-		xmlRPC:  NewXMLRPC()}
+	return &Supervisor{activeConfig: config.NewConfig(configFile),
+		pendingConfig: nil,
+		procMgr:       process.NewManager(),
+		xmlRPC:        NewXMLRPC()}
 }
 
 // GetConfig get the loaded supervisor configuration
 func (s *Supervisor) GetConfig() *config.Config {
-	return s.config
+	return s.activeConfig
 }
 
 // GetVersion get the version of supervisor
@@ -121,7 +130,7 @@ func (s *Supervisor) GetIdentification(r *http.Request, args *struct{}, reply *s
 
 // GetSupervisorID get the supervisor identifier from configuration file
 func (s *Supervisor) GetSupervisorID() string {
-	entry, ok := s.config.GetSupervisord()
+	entry, ok := s.activeConfig.GetSupervisord()
 	if !ok {
 		return "supervisor"
 	}
@@ -137,8 +146,13 @@ func (s *Supervisor) GetState(r *http.Request, args *struct{}, reply *struct{ St
 	// 0            RESTARTING
 	// -1           SHUTDOWN
 	log.Debug("Get state")
-	reply.StateInfo.Statecode = 1
-	reply.StateInfo.Statename = "RUNNING"
+	if s.IsRestarting() {
+		reply.StateInfo.Statecode = 0
+		reply.StateInfo.Statename = "RESTARTING"
+	} else {
+		reply.StateInfo.Statecode = 1
+		reply.StateInfo.Statename = "RUNNING"
+	}
 	return nil
 }
 
@@ -146,7 +160,7 @@ func (s *Supervisor) GetState(r *http.Request, args *struct{}, reply *struct{ St
 //
 // Return the name of all the programs
 func (s *Supervisor) GetPrograms() []string {
-	return s.config.GetProgramNames()
+	return s.activeConfig.GetProgramNames()
 }
 
 // GetPID get the pid of supervisor
@@ -185,7 +199,9 @@ func (s *Supervisor) Shutdown(r *http.Request, args *struct{}, reply *struct{ Re
 func (s *Supervisor) Restart(r *http.Request, args *struct{}, reply *struct{ Ret bool }) error {
 	log.Info("Receive instruction to restart")
 	s.restarting.Store(true)
-	reply.Ret = true
+	err := s.Reload(RestartAll)
+	reply.Ret = err == nil
+	s.restarting.Store(false)
 	return nil
 }
 
@@ -219,7 +235,7 @@ func (s *Supervisor) getNodeName() string {
 
 	nodename, _ := os.Hostname()
 
-	httpServerConfig, ok := s.config.GetInetHTTPServer()
+	httpServerConfig, ok := s.activeConfig.GetInetHTTPServer()
 	if ok {
 		nodename = httpServerConfig.GetString("nodename", nodename)
 	}
@@ -451,48 +467,73 @@ func (s *Supervisor) SendRemoteCommEvent(r *http.Request, args *RemoteCommEvent,
 }
 
 // Reload supervisord configuration.
-func (s *Supervisor) Reload(restart bool) (addedGroup []string, changedGroup []string, removedGroup []string, err error) {
+func (s *Supervisor) Reload(action ReloadAction) error {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	// get the previous loaded programs
-	prevPrograms := s.config.GetProgramNames()
-	prevProgGroup := s.config.ProgramGroup.Clone()
 
-	loadedPrograms, err := s.config.Load()
+	newConfig := config.NewConfig(s.activeConfig.GetConfigFile())
+
+	loadedPrograms, err := newConfig.Load()
 
 	if err != nil {
 		log.Error("failed to load config: ", err)
-		return nil, nil, nil, err
+		return err
 	}
 
 	log.WithFields(log.Fields{"programs": strings.Join(loadedPrograms, ",")}).Info("loaded programs")
 
+	// get the previous loaded programs
+
+	prevConfig := s.activeConfig
+	s.activeConfig = newConfig
+
 	if checkErr := s.checkRequiredResources(); checkErr != nil {
 		log.Error(checkErr)
 		os.Exit(1)
+	}
 
+	prevEntries := prevConfig.GetAllEntries()
+
+	// Remove the programs that are removed from configuration file
+	for _, prevEntry := range prevEntries {
+		if prevEntry.IsProgram() {
+			program := prevEntry.GetProgramName()
+			if newEntry, ok := newConfig.GetEntry(program); !ok || !newEntry.IsProgram() || !prevEntry.IsSame(newEntry) {
+				log.WithFields(log.Fields{"program": program}).Info("the program is removed and will be stopped")
+				s.activeConfig.RemoveProgram(program)
+				proc := s.procMgr.Remove(program)
+				if proc != nil {
+					proc.Stop(false)
+				}
+			}
+		}
+	}
+
+	currentEntries := newConfig.GetAllEntries()
+
+	// Add the new programs that are added in configuration file
+	for _, currentEntry := range currentEntries {
+		if currentEntry.IsProgram() {
+			program := currentEntry.GetProgramName()
+			proc := s.procMgr.Find(program)
+			// If the program is not exist, create it. If the program is exist and the action is RestartAll, restart it.
+			if proc == nil {
+				log.WithFields(log.Fields{"program": program}).Info("the program is added and will be created")
+				proc = s.procMgr.CreateProcess(s.GetSupervisorID(), currentEntry)
+			} else if action == RestartAll && proc.IsRunning() {
+				log.WithFields(log.Fields{"program": program}).Info("the program will be restarted")
+				proc.Stop(true)
+				proc.Start(true)
+			}
+		}
 	}
 
 	s.setSupervisordInfo()
 	s.startEventListeners()
-	s.createPrograms(prevPrograms)
-	if restart {
-		s.startHTTPServer()
-	}
+	s.startHTTPServer()
 	s.startAutoStartPrograms()
 
-	removedPrograms := util.Sub(prevPrograms, loadedPrograms)
-	for _, removedProg := range removedPrograms {
-		log.WithFields(log.Fields{"program": removedProg}).Info("the program is removed and will be stopped")
-		s.config.RemoveProgram(removedProg)
-		proc := s.procMgr.Remove(removedProg)
-		if proc != nil {
-			proc.Stop(false)
-		}
-
-	}
-	addedGroup, changedGroup, removedGroup = s.config.ProgramGroup.Sub(prevProgGroup)
-	return addedGroup, changedGroup, removedGroup, err
+	return nil
 
 }
 
@@ -514,8 +555,8 @@ func (s *Supervisor) WaitForExit() {
 
 func (s *Supervisor) createPrograms(prevPrograms []string) {
 
-	programs := s.config.GetProgramNames()
-	for _, entry := range s.config.GetPrograms() {
+	programs := s.activeConfig.GetProgramNames()
+	for _, entry := range s.activeConfig.GetPrograms() {
 		s.procMgr.CreateProcess(s.GetSupervisorID(), entry)
 	}
 	removedPrograms := util.Sub(prevPrograms, programs)
@@ -529,7 +570,7 @@ func (s *Supervisor) startAutoStartPrograms() {
 }
 
 func (s *Supervisor) startEventListeners() {
-	eventListeners := s.config.GetEventListeners()
+	eventListeners := s.activeConfig.GetEventListeners()
 	for _, entry := range eventListeners {
 		proc := s.procMgr.CreateProcess(s.GetSupervisorID(), entry)
 		proc.Start(false)
@@ -541,7 +582,7 @@ func (s *Supervisor) startEventListeners() {
 }
 
 func (s *Supervisor) startHTTPServer() {
-	httpServerConfig, ok := s.config.GetInetHTTPServer()
+	httpServerConfig, ok := s.activeConfig.GetInetHTTPServer()
 	s.xmlRPC.Stop()
 	if ok {
 		addr := httpServerConfig.GetString("port", "")
@@ -564,9 +605,9 @@ func (s *Supervisor) startHTTPServer() {
 		}
 	}
 
-	httpServerConfig, ok = s.config.GetUnixHTTPServer()
+	httpServerConfig, ok = s.activeConfig.GetUnixHTTPServer()
 	if ok {
-		env := config.NewStringExpression("here", s.config.GetConfigFileDir())
+		env := config.NewStringExpression("here", s.activeConfig.GetConfigFileDir())
 		sockFile, err := env.Eval(httpServerConfig.GetString("file", "/tmp/supervisord.sock"))
 		if err == nil {
 			cond := sync.NewCond(&sync.Mutex{})
@@ -591,7 +632,7 @@ func (s *Supervisor) getRemoteNodes() map[string]*NodeLoginInfo {
 
 	result := make(map[string]*NodeLoginInfo)
 
-	httpServerConfig, exist := s.config.GetInetHTTPServer()
+	httpServerConfig, exist := s.activeConfig.GetInetHTTPServer()
 
 	if !exist {
 		log.Warn("inet_http_server section not found in config file")
@@ -621,9 +662,9 @@ func (s *Supervisor) getRemoteNodes() map[string]*NodeLoginInfo {
 }
 
 func (s *Supervisor) GetPidFile() string {
-	supervisordConf, ok := s.config.GetSupervisord()
+	supervisordConf, ok := s.activeConfig.GetSupervisord()
 	if ok {
-		env := config.NewStringExpression("here", s.config.GetConfigFileDir())
+		env := config.NewStringExpression("here", s.activeConfig.GetConfigFileDir())
 		pidfile, err := env.Eval(supervisordConf.GetString("pidfile", "supervisord.pid"))
 		if err == nil {
 			return pidfile
@@ -632,11 +673,11 @@ func (s *Supervisor) GetPidFile() string {
 	return "supervisord.pid"
 }
 func (s *Supervisor) setSupervisordInfo() {
-	supervisordConf, ok := s.config.GetSupervisord()
+	supervisordConf, ok := s.activeConfig.GetSupervisord()
 	if ok {
 		// set supervisord log
 
-		env := config.NewStringExpression("here", s.config.GetConfigFileDir())
+		env := config.NewStringExpression("here", s.activeConfig.GetConfigFileDir())
 		logFile, err := env.Eval(supervisordConf.GetString("logfile", "supervisord.log"))
 		if err != nil {
 			logFile, err = process.PathExpand(logFile)
@@ -687,7 +728,45 @@ func toLogLevel(level string) log.Level {
 // ReloadConfig reloads supervisord configuration file
 func (s *Supervisor) ReloadConfig(r *http.Request, args *struct{}, reply *types.ReloadConfigResult) error {
 	log.Info("start to reload config")
-	addedGroup, changedGroup, removedGroup, err := s.Reload(false)
+	s.pendingConfig = config.NewConfig(s.activeConfig.GetConfigFile())
+
+	_, err := s.pendingConfig.Load()
+	if err != nil {
+		log.Error("failed to load config: ", err)
+		return err
+	}
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	newGroupEntries := s.pendingConfig.GetGroupEntries()
+
+	addedGroup := make([]string, 0)
+	changedGroup := make([]string, 0)
+	removedGroup := make([]string, 0)
+
+	// Compare the new group entries with the old group entries to find out which groups are added, changed
+	for _, newGroupEntry := range newGroupEntries {
+		newGroupName := newGroupEntry.GetGroupName()
+		newPrograms := newGroupEntry.GetPrograms()
+		if oldGroupEntry, oldExist := s.activeConfig.GetEntry(newGroupName); oldExist {
+			oldPrograms := oldGroupEntry.GetPrograms()
+			if !util.IsSameStringArray(newPrograms, oldPrograms) {
+				changedGroup = append(changedGroup, newGroupName)
+			}
+		} else {
+			addedGroup = append(addedGroup, newGroupName)
+		}
+	}
+
+	// Compare the old group entries with the new group entries to find out which groups are removed
+	oldGroupEntries := s.activeConfig.GetGroupEntries()
+	for _, oldGroupEntry := range oldGroupEntries {
+		if _, ok := s.pendingConfig.GetEntry(oldGroupEntry.GetGroupName()); !ok {
+			removedGroup = append(removedGroup, oldGroupEntry.GetGroupName())
+		}
+	}
+
 	if len(addedGroup) > 0 {
 		log.WithFields(log.Fields{"groups": strings.Join(addedGroup, ",")}).Info("added groups")
 	}
@@ -707,14 +786,82 @@ func (s *Supervisor) ReloadConfig(r *http.Request, args *struct{}, reply *types.
 
 // AddProcessGroup adds a process group to the supervisor
 func (s *Supervisor) AddProcessGroup(r *http.Request, args *struct{ Name string }, reply *struct{ Success bool }) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
 	reply.Success = false
-	return nil
+
+	newConfig := config.NewConfig(s.activeConfig.GetConfigFile())
+	_, err := newConfig.Load()
+	if err != nil {
+		log.Error("failed to load config: ", err)
+		return err
+	}
+
+	groupEntries := newConfig.GetGroupEntries()
+
+	for _, groupEntry := range groupEntries {
+		if groupEntry.GetGroupName() == args.Name {
+			programs := groupEntry.GetPrograms()
+			for _, program := range programs {
+				oldEntry, oldExist := s.activeConfig.GetEntry(program)
+				newEntry, _ := newConfig.GetEntry(program)
+				if newEntry != nil {
+					if !oldExist || !newEntry.IsSame(oldEntry) {
+						log.WithFields(log.Fields{"program": program, "group": groupEntry}).Info("the program is added or changed and will be created")
+						proc := s.procMgr.Remove(program)
+						// stop the old one
+						if proc != nil {
+							proc.Stop(true)
+						}
+						s.activeConfig.AddEntry(newEntry)
+
+						// create the new one and start it
+						proc = s.procMgr.CreateProcess(s.GetSupervisorID(), newEntry)
+						if proc != nil {
+							proc.Start(true)
+						}
+					}
+				}
+			}
+			reply.Success = true
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no such group %s", args.Name)
 }
 
 // RemoveProcessGroup removes a process group from the supervisor
 func (s *Supervisor) RemoveProcessGroup(r *http.Request, args *struct{ Name string }, reply *struct{ Success bool }) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
 	reply.Success = false
-	return nil
+
+	groupEntries := s.activeConfig.GetGroupEntries()
+
+	for _, groupEntry := range groupEntries {
+		if groupEntry.GetGroupName() == args.Name {
+			programs := groupEntry.GetPrograms()
+			for _, program := range programs {
+				_, oldExist := s.activeConfig.RemoveEntry(program)
+				if oldExist {
+					log.WithFields(log.Fields{"program": program, "group": groupEntry}).Info("the program will be removed")
+					proc := s.procMgr.Remove(program)
+					// stop the old one
+					if proc != nil {
+						proc.Stop(true)
+					}
+				}
+			}
+			s.activeConfig.RemoveEntry(groupEntry.GetGroupName())
+			reply.Success = true
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no such group %s", args.Name)
 }
 
 // ReadProcessStdoutLog reads stdout of given program
@@ -767,17 +914,27 @@ func (s *Supervisor) TailProcessStderrLog(r *http.Request, args *ProcessLogReadI
 
 // ClearProcessLogs clears log of given program
 func (s *Supervisor) ClearProcessLogs(r *http.Request, args *struct{ Name string }, reply *struct{ Success bool }) error {
-	proc := s.procMgr.Find(args.Name)
-	if proc == nil {
-		return fmt.Errorf("no such process %s", args.Name)
+	if args.Name == "" || args.Name == "all" {
+		s.procMgr.ForEachProcess(func(proc *process.Process) {
+			_ = proc.StdoutLog.ClearAllLogFile()
+			_ = proc.StderrLog.ClearAllLogFile()
+		})
+		reply.Success = true
+		return nil
+	} else {
+		proc := s.procMgr.Find(args.Name)
+		if proc == nil {
+			return fmt.Errorf("no such process %s", args.Name)
+		}
+
+		err1 := proc.StdoutLog.ClearAllLogFile()
+		err2 := proc.StderrLog.ClearAllLogFile()
+		reply.Success = err1 == nil && err2 == nil
+		if err1 != nil {
+			return err1
+		}
+		return err2
 	}
-	err1 := proc.StdoutLog.ClearAllLogFile()
-	err2 := proc.StderrLog.ClearAllLogFile()
-	reply.Success = err1 == nil && err2 == nil
-	if err1 != nil {
-		return err1
-	}
-	return err2
 }
 
 // ClearAllProcessLogs clears logs of all programs
